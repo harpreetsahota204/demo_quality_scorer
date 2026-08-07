@@ -14,16 +14,18 @@ import {
 export type ShowEpisodes = (ids: string[], description: string) => void;
 
 // Matches numpy.histogram bin semantics: bins are half-open [x0, x1) except
-// the last bin, which also includes its right edge.
+// the last bin, which also includes its right edge. Values are looked up on
+// the clicked channel's series.
 function rowsInBin(
   rows: QualityRow[],
   metric: MotionMetric,
+  channel: string,
   bar: HistogramBar,
   isLast: boolean
 ): QualityRow[] {
   return rows.filter((r) => {
-    const v = r[metric];
-    if (v === null) return false;
+    const v = r.by_channel?.[channel]?.[metric];
+    if (v === null || v === undefined) return false;
     return v >= bar.x0 && (v < bar.x1 || (isLast && v <= bar.x1));
   });
 }
@@ -36,8 +38,9 @@ const EXPLAINERS: Record<string, string> = {
     "Spectral Arc Length: motion smoothness measured from the shape of the speed profile's " +
     "frequency spectrum. Smooth, well-coordinated motion has a simple spectrum and a value " +
     "closer to 0; jerky, fragmented motion drags it more negative. Bars count episodes in the " +
-    "current view; the dashed line marks the warn threshold. Click a bar to filter the samples " +
-    "panel to the episodes in that range.",
+    "current view, one colored series per scored channel (each channel is normalized against " +
+    "its own dataset-wide stats); dashed lines mark warn thresholds. Click a bar to filter the " +
+    "samples panel to the episodes in that range on that channel.",
   ldlj:
     "Log Dimensionless Jerk: total jerk (rate of change of acceleration) over the episode, " +
     "scaled to be comparable across motions of different speeds and durations, then " +
@@ -53,8 +56,10 @@ const EXPLAINERS: Record<string, string> = {
   ranking:
     "Episodes ranked worst-first. Overall is a weighted average of each metric's robust " +
     "z-score: how many robust standard deviations (median/MAD) worse than the dataset median " +
-    "the episode is, so scores are comparable across metrics with different units. Flags " +
-    "counts metrics at warn severity (z \u2265 2) or worse.",
+    "the episode is, so scores are comparable across metrics with different units. When " +
+    "several channels are scored, each metric shows its worst channel's value (worst-of, not " +
+    "averaged \u2014 a smooth arm never masks a jerky one); hover a value for the per-channel " +
+    "breakdown. Flags counts metrics at warn severity (z \u2265 2) or worse.",
   health_verdicts:
     "Sensor-health rollup per episode, computed from raw message timestamps and values: " +
     "dropouts, frame-rate stability, clock drift, cross-channel desync, and value clipping. " +
@@ -72,6 +77,23 @@ const EXPLAINERS: Record<string, string> = {
     "sits from its most similar episodes. Top-right points are unusual by both measures; red " +
     "points crossed the warn threshold.",
 };
+
+// Ranking-table metric cell: worst channel's value, with a hover title
+// breaking the value down per channel when several were scored
+function metricCell(row: QualityRow, metric: MotionMetric): React.ReactNode {
+  const channels = Object.keys(row.by_channel ?? {});
+  if (channels.length < 2) return fmt(row[metric]);
+
+  const worst = row.worst_channel?.[metric];
+  const breakdown = channels
+    .map((c) => {
+      const v = row.by_channel[c]?.[metric];
+      const marker = c === worst ? " (worst, shown)" : "";
+      return `${c}: ${v === null || v === undefined ? "–" : v.toFixed(3)}${marker}`;
+    })
+    .join("\n");
+  return <span title={breakdown}>{fmt(row[metric])}</span>;
+}
 
 function scoreColor(score: number | null): string {
   if (score === null) return theme.text;
@@ -110,13 +132,14 @@ export function MotionTab(props: {
         }}
       >
         {MOTION_METRICS.map((metric) => {
-          const bars = data.histograms[metric] ?? [];
-          const threshold = data.warn_thresholds[metric];
+          const hist = data.histograms[metric] ?? { channels: [], bars: [] };
+          const thresholds = data.warn_thresholds[metric];
           const arrow = data.smoother_direction[metric] === "left" ? "← smoother" : "smoother →";
+          const single = hist.channels.length === 1 ? thresholds?.[hist.channels[0]] : undefined;
           const base =
-            threshold !== undefined
-              ? `${arrow} · warn ${data.smoother_direction[metric] === "left" ? "≥" : "≤"} ${threshold.toPrecision(3)}`
-              : arrow;
+            single !== undefined
+              ? `${arrow} · warn ${data.smoother_direction[metric] === "left" ? "≥" : "≤"} ${single.toPrecision(3)}`
+              : `${arrow} · dashed line = per-channel warn threshold`;
           return (
             <Card
               key={metric}
@@ -125,14 +148,16 @@ export function MotionTab(props: {
               info={EXPLAINERS[metric]}
             >
               <MetricHistogram
-                bars={bars}
-                warnThreshold={threshold}
-                onBarClick={(bar) => {
+                data={hist}
+                warnThresholds={thresholds}
+                onBarClick={(bar, channel) => {
+                  const bars = hist.bars;
                   const isLast = bars.length > 0 && bar.x1 === bars[bars.length - 1].x1;
-                  const hits = rowsInBin(data.rows, metric, bar, isLast);
+                  const hits = rowsInBin(data.rows, metric, channel, bar, isLast);
+                  const channelNote = hist.channels.length > 1 ? ` on ${channel}` : "";
                   onShow(
                     hits.map((r) => r.id),
-                    `${METRIC_LABELS[metric].short} in [${bar.x0.toPrecision(3)}, ${bar.x1.toPrecision(3)}]`
+                    `${METRIC_LABELS[metric].short}${channelNote} in [${bar.x0.toPrecision(3)}, ${bar.x1.toPrecision(3)}]`
                   );
                 }}
               />
@@ -166,10 +191,7 @@ export function MotionTab(props: {
               </span>
             ),
             n_flags: r.n_flags,
-            sparc: fmt(r.sparc),
-            ldlj: fmt(r.ldlj),
-            jerk_rms: fmt(r.jerk_rms),
-            psd_lf_hf: fmt(r.psd_lf_hf),
+            ...Object.fromEntries(MOTION_METRICS.map((m) => [m, metricCell(r, m)])),
           }))}
           onRowClick={props.onOpen}
         />

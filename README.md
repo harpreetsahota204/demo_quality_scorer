@@ -49,12 +49,15 @@ frontend (`src/`), rebuild with `npm install && npm run build` (or
    toggleable:
    - **Motion smoothness** — auto-checked when the first sample has at
      least one telemetry channel carrying a numeric (speed-derivable)
-     signal, with a single-select dropdown for which channel represents
-     the motion, plus `idle_alpha` (idle-speed threshold, as a fraction of
-     the episode's own median speed — default `0.05`) and
-     `jerk_cutoff_hz` (RMS-jerk pre-filter cutoff — default `10.0`).
-     Auto-unchecked with a visible reason if no such channel exists (e.g. a
-     camera-only episode).
+     signal, with a multi-select of which channels carry motion
+     (default: all eligible channels — e.g. both arms of a bimanual rig).
+     Each selected channel is scored independently and the worst channel
+     per metric drives the episode's score (see [the worst-of
+     rationale](#why-worst-of-across-channels)). Also `idle_alpha`
+     (idle-speed threshold, as a fraction of the episode's own median
+     speed — default `0.05`) and `jerk_cutoff_hz` (RMS-jerk pre-filter
+     cutoff — default `10.0`). Auto-unchecked with a visible reason if no
+     such channel exists (e.g. a camera-only episode).
    - **Sensor health** — on by default, multi-select of every discovered
      channel (default: all of them).
    - **Outliers** — on by default. There's no channel picker: both models
@@ -90,25 +93,53 @@ scorer across the whole view to make it comparable again.
 
 Four histograms — Smoothness (SPARC), Normalized jerk (LDLJ), Jerk intensity
 (RMS), and Low/high frequency ratio (PSD) — and a worst-first ranking table
-sorted by `quality.overall_score`. Each histogram's subtitle says which
-direction is smoother, and a dashed line marks where warn severity (z >= 2
-against the batch) starts in that metric's own units. Every chart carries an
-"i" icon with a plain-language explainer of what the metric means and how to
-read the plot.
+sorted by `quality.overall_score`. When several motion channels were scored,
+each histogram draws one colored series per channel (legend on top), and
+dashed lines mark each channel's own warn threshold (z >= 2 against the
+batch) in that channel's units. Every chart carries an "i" icon with a
+plain-language explainer of what the metric means and how to read the plot.
 
 The charts are interactive:
 
 - **Click a histogram bar** to filter the samples panel to the episodes in
-  that bin (a toast confirms what's showing; clear the view bar to reset).
-  Since the panel re-ranks to the current view, the histograms then re-bin
-  to the filtered subset.
+  that bin on that channel (a toast confirms what's showing; clear the view
+  bar to reset). Since the panel re-ranks to the current view, the
+  histograms then re-bin to the filtered subset.
 - **Click any row** in the ranking table to jump straight into that
   episode's multimodal viewer, with a toast surfacing the timecode of its
-  worst flagged interval.
+  worst flagged interval. Metric cells show the worst channel's value —
+  hover one for the per-channel breakdown.
+
+### Why worst-of across channels
+
+Each selected motion channel is scored independently and normalized against
+its own per-(metric, channel) dataset-wide stats — different channels can
+carry different units (rad/s vs m/s), so pooling them into one stats fit
+would be meaningless. The per-channel values are then combined
+**worst-of**: the channel with the highest (worst) z-score per metric
+drives the episode's top-level value, `overall_score`, and `n_flags`.
+
+This deliberately diverges from the published choice in the closest
+comparable work: RINSE ([arXiv:2604.23000](https://arxiv.org/abs/2604.23000))
+*averages* smoothness over both arms when filtering bimanual training data,
+and that averaging is validated against downstream policy success. Filtering
+and triage optimize different objectives, though. Averaging asks "how good
+is this episode overall as training signal"; triage asks "is there anything
+here a human should see." A jerky right arm averaged with a smooth left arm
+looks fine — which is exactly the flag a reviewer needs surfaced. Movement
+science reports smoothness per limb and defines no standard cross-limb
+aggregate at all, so per-channel scoring with an explicit, documented
+rollup is the honest middle ground. The per-channel values are kept on
+every sample (`quality.motion_by_channel`) and in the panel's hover
+breakdowns, so nothing is hidden by the rollup.
 
 The panel opens onto the first tab the last run actually scored — a
 health-only run opens onto Health, and a tab whose family wasn't scored
 shows an explanation instead of empty plots.
+
+With multiple motion channels scored, each top-level metric field below
+(`quality.sparc`, etc.) holds the **worst channel's** value; per-channel
+values live in `quality.motion_by_channel`.
 
 | Field | What it measures | Direction |
 |---|---|---|
@@ -116,6 +147,8 @@ shows an explanation instead of empty plots.
 | `ldlj` | Log dimensionless jerk of the speed profile | **Less negative = smoother.** Very negative = rough motion |
 | `jerk_rms` | RMS jerk of the speed profile, after a zero-phase low-pass filter (`jerk_cutoff_hz`, default 10 Hz) applied before differentiating | **Lower = smoother.** High values = abrupt corrections, kickbacks, or actuator issues. Down-weighted (0.3x) in `overall_score` since it tends to co-vary with `sparc`/`ldlj`/`psd_lf_hf` — all four summarize the same speed profile's roughness |
 | `psd_lf_hf` | Ratio of low-frequency to high-frequency power (Welch PSD) in the speed profile — **our own metric**, not a reproduction of Sojib & Begum's PSD data-quality metric (arXiv:2605.01544), whose "PSD" is raw summed DFT power on 3D end-effector *position*, ranked ascending. The name overlap is coincidental and the numbers aren't comparable to that paper's | **Higher = smoother** (energy concentrated at low frequencies). Low values mean a lot of high-frequency noise/vibration |
+| `motion_by_channel` | List of per-channel motion metric docs (`channel` + every metric above), one entry per scored channel | Raw values in each channel's own units; this is what the multi-series histograms and hover breakdowns read |
+| `motion_worst_channel` | Which channel's z-score drove each top-level motion value (e.g. `{sparc: "/right-arm-state"}`) | Provenance for the worst-of rollup — tells you which side to watch first |
 | `idle_frac` | Fraction of the motion channel's windows below an idle-speed threshold, computed as `idle_alpha * median(speed)` **for that episode's own channel** (not a fixed absolute speed) — this is what makes the same threshold meaningful whether a channel reports rad/s, m/s, or a normalized unit | Not shown in this tab (visible via the sidebar/`dataset.values()`) and not scored into `overall_score`. High = episode is mostly stationary |
 | `saturation_frac` | Fraction of samples pinned at their own observed min/max (heuristic — see [Known limitations](#known-limitations)) | Not shown in this tab; not scored into `overall_score` |
 | `overall_score` | Weighted mean of every *enabled* metric's robust z-score (motion + health + outlier), oriented so higher is always worse. Disabling a family removes its metrics and renormalizes the remaining weights, rather than diluting the average with zeros | The sort key. `0` = typical for this batch; `+2` and up starts to be genuinely unusual; large negative scores are your *cleanest* episodes |
@@ -294,6 +327,13 @@ the as-built plugin diverges and why — the code is the source of truth:
   (camera-only episodes, or anyone who just wants sensor-health checks)
   a first-class, clearly-labeled path instead of an implicit side effect
   of unchecking everything else.
+- **Motion channels are multi-select, scored per channel, rolled up
+  worst-of** (`config_version` 3). The PRD-era single channel picker made a
+  bimanual rig half-blind: score one arm and a jerky other arm ranks clean.
+  Channels are normalized per (metric, channel) — units differ across
+  channels — and the worst z per metric drives the episode. See [Why
+  worst-of across channels](#why-worst-of-across-channels) for why this
+  intentionally diverges from RINSE's cross-arm averaging.
 - **Idle threshold and jerk RMS** were tuned after initial validation: the
   idle-speed threshold is relative to each episode's own median speed
   (`idle_alpha * median(speed)`) rather than one fixed absolute value
