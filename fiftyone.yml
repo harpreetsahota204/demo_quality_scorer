@@ -1,0 +1,22 @@
+name: demo-quality-scorer
+type: plugin
+author: Harpreet Sahota
+version: 0.1.0
+license: Apache 2.0
+description: >-
+  Episode- and interval-level quality triage for multimodal MCAP datasets
+  (teleop manipulation, AV, UAV, rover, egocentric). Computes smoothness
+  (SPARC/LDLJ/jerk/PSD), activity, sensor-health, and outlier metrics
+  directly from the channels FiftyOne discovers in each episode, then ranks
+  episodes worst-first and deep-links straight into the multimodal viewer.
+fiftyone:
+  version: ">=1.19"
+operators:
+  - compute_episode_quality
+  - get_quality_panel_data
+  - open_quality_episode
+  - tag_quality_episodes
+  - show_quality_episodes
+  - prompt_quality_scorer
+panels:
+  - quality_panel

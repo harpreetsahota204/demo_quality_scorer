@@ -1,0 +1,29 @@
+{
+  "name": "demo-quality-scorer",
+  "version": "0.2.0",
+  "description": "Episode Quality panel (React frontend for the demo-quality-scorer plugin)",
+  "main": "dist/index.umd.js",
+  "fiftyone": {
+    "script": "dist/index.umd.js"
+  },
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch"
+  },
+  "dependencies": {
+    "recharts": "^2.15.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "recoil": "^0.7.7",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  }
+}
