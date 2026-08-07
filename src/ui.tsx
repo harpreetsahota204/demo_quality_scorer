@@ -1,21 +1,40 @@
 import React from "react";
 import { theme } from "./theme";
 
+const TIP_WIDTH = 280;
+
 export function InfoTip(props: { text: string }) {
-  const [open, setOpen] = React.useState(false);
+  // position:fixed + viewport clamping so the tooltip never clips against
+  // the panel's own scroll container or the window edge
+  const [pos, setPos] = React.useState<{ top?: number; bottom?: number; left: number } | null>(null);
+  const iconRef = React.useRef<HTMLSpanElement>(null);
+
+  const open = () => {
+    const rect = iconRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const left = Math.max(8, Math.min(rect.left - 8, window.innerWidth - TIP_WIDTH - 12));
+    if (rect.bottom > window.innerHeight * 0.6) {
+      setPos({ bottom: window.innerHeight - rect.top + 6, left });
+    } else {
+      setPos({ top: rect.bottom + 6, left });
+    }
+  };
+
+  const active = pos !== null;
   return (
     <span
       style={{ position: "relative", display: "inline-flex", marginLeft: 6 }}
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
+      onMouseEnter={open}
+      onMouseLeave={() => setPos(null)}
     >
       <span
+        ref={iconRef}
         style={{
           width: 14,
           height: 14,
           borderRadius: "50%",
-          border: `1px solid ${open ? theme.accent : theme.textDim}`,
-          color: open ? theme.accent : theme.textDim,
+          border: `1px solid ${active ? theme.accent : theme.textDim}`,
+          color: active ? theme.accent : theme.textDim,
           fontSize: 10,
           fontWeight: 700,
           fontStyle: "italic",
@@ -31,14 +50,13 @@ export function InfoTip(props: { text: string }) {
       >
         i
       </span>
-      {open && (
+      {pos && (
         <div
           style={{
-            position: "absolute",
-            top: 20,
-            left: -8,
-            zIndex: 20,
-            width: 280,
+            position: "fixed",
+            ...pos,
+            zIndex: 1000,
+            width: TIP_WIDTH,
             background: "#111",
             border: `1px solid ${theme.cardBorder}`,
             borderRadius: 6,

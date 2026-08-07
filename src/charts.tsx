@@ -25,7 +25,7 @@ const tooltipStyle: React.CSSProperties = {
   padding: "6px 10px",
 };
 
-function HistTooltip({ active, payload, channels }: any) {
+function HistTooltip({ active, payload, channels, allChannels }: any) {
   if (!active || !payload?.length) return null;
   const bar: HistogramBar = payload[0].payload;
   return (
@@ -34,8 +34,8 @@ function HistTooltip({ active, payload, channels }: any) {
         {bar.x0.toPrecision(3)} to {bar.x1.toPrecision(3)}
       </div>
       {channels.map((channel: string) => (
-        <div key={channel} style={{ color: channelColor(channels, channel) }}>
-          {channels.length > 1 ? `${channel}: ` : ""}
+        <div key={channel} style={{ color: channelColor(allChannels, channel) }}>
+          {allChannels.length > 1 ? `${channel}: ` : ""}
           {bar.counts[channel] ?? 0} episode(s)
         </div>
       ))}
@@ -43,37 +43,20 @@ function HistTooltip({ active, payload, channels }: any) {
   );
 }
 
-function ChannelLegend(props: { channels: string[] }) {
-  if (props.channels.length < 2) return null;
-  return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 2 }}>
-      {props.channels.map((channel) => (
-        <span
-          key={channel}
-          style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, color: theme.textDim }}
-        >
-          <span
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: 2,
-              background: channelColor(props.channels, channel),
-            }}
-          />
-          {channel}
-        </span>
-      ))}
-    </div>
-  );
-}
-
 export function MetricHistogram(props: {
   data: MetricHistogramData;
+  /** Full channel list across the tab -- keeps series colors stable while filtering */
+  allChannels: string[];
+  /** When set, render only this channel's series */
+  filterChannel?: string | null;
   warnThresholds?: Record<string, number>;
   onBarClick?: (bar: HistogramBar, channel: string) => void;
 }) {
-  const { data, warnThresholds, onBarClick } = props;
-  const { channels, bars } = data;
+  const { data, allChannels, filterChannel, warnThresholds, onBarClick } = props;
+  const { bars } = data;
+  const channels =
+    filterChannel && data.channels.includes(filterChannel) ? [filterChannel] : data.channels;
+  const multi = allChannels.length > 1;
 
   // The x-axis is categorical (one band per bin), so anchor each channel's
   // warn line to the bin whose range contains its threshold.
@@ -88,50 +71,48 @@ export function MetricHistogram(props: {
   }
 
   return (
-    <div>
-      <ChannelLegend channels={channels} />
-      <ResponsiveContainer width="100%" height={180}>
-        {/* top margin leaves headroom for the "warn" reference-line label */}
-        <BarChart data={bars} margin={{ top: 18, right: 8, bottom: 0, left: -18 }} barGap={0}>
-          <CartesianGrid stroke={theme.cardBorder} strokeDasharray="3 3" vertical={false} />
-          <XAxis
-            dataKey="x"
-            tick={axisStyle}
-            tickFormatter={(v: number) => Number(v).toPrecision(2)}
-            interval="preserveStartEnd"
-            tickLine={false}
-            axisLine={{ stroke: theme.cardBorder }}
+    <ResponsiveContainer width="100%" height={180}>
+      {/* top margin leaves headroom for the "warn" reference-line label */}
+      <BarChart data={bars} margin={{ top: 18, right: 8, bottom: 0, left: -18 }} barGap={0}>
+        <CartesianGrid stroke={theme.cardBorder} strokeDasharray="3 3" vertical={false} />
+        <XAxis
+          dataKey="x"
+          tick={axisStyle}
+          tickFormatter={(v: number) => Number(v).toPrecision(2)}
+          interval="preserveStartEnd"
+          tickLine={false}
+          axisLine={{ stroke: theme.cardBorder }}
+        />
+        <YAxis tick={axisStyle} allowDecimals={false} tickLine={false} axisLine={false} />
+        <Tooltip
+          content={<HistTooltip channels={channels} allChannels={allChannels} />}
+          cursor={{ fill: "#ffffff10" }}
+        />
+        {channels.map((channel) => (
+          <Bar
+            key={channel}
+            name={channel}
+            dataKey={(bar: HistogramBar) => bar.counts[channel] ?? 0}
+            fill={multi ? channelColor(allChannels, channel) : theme.bar}
+            radius={[2, 2, 0, 0]}
+            isAnimationActive={false}
+            onClick={(entry: any) => onBarClick?.((entry?.payload ?? entry) as HistogramBar, channel)}
+            style={{ cursor: onBarClick ? "pointer" : "default" }}
           />
-          <YAxis tick={axisStyle} allowDecimals={false} tickLine={false} axisLine={false} />
-          <Tooltip content={<HistTooltip channels={channels} />} cursor={{ fill: "#ffffff10" }} />
-          {channels.map((channel) => (
-            <Bar
-              key={channel}
-              name={channel}
-              dataKey={(bar: HistogramBar) => bar.counts[channel] ?? 0}
-              fill={channelColor(channels, channel)}
-              radius={[2, 2, 0, 0]}
-              isAnimationActive={false}
-              onClick={(entry: any) => onBarClick?.((entry?.payload ?? entry) as HistogramBar, channel)}
-              style={{ cursor: onBarClick ? "pointer" : "default" }}
-            />
-          ))}
-          {warnLines.map(({ channel, x }) => (
-            <ReferenceLine
-              key={channel}
-              x={x}
-              stroke={channels.length > 1 ? channelColor(channels, channel) : theme.warn}
-              strokeDasharray="5 4"
-              label={
-                channels.length > 1
-                  ? undefined
-                  : { value: "warn", position: "top", fill: theme.warn, fontSize: 10 }
-              }
-            />
-          ))}
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
+        ))}
+        {warnLines.map(({ channel, x }) => (
+          <ReferenceLine
+            key={channel}
+            x={x}
+            stroke={multi ? channelColor(allChannels, channel) : theme.warn}
+            strokeDasharray="5 4"
+            label={
+              multi ? undefined : { value: "warn", position: "top", fill: theme.warn, fontSize: 10 }
+            }
+          />
+        ))}
+      </BarChart>
+    </ResponsiveContainer>
   );
 }
 

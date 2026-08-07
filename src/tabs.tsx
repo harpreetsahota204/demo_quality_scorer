@@ -1,6 +1,6 @@
 import React from "react";
 import { MetricHistogram, OutlierScatter, VerdictBar } from "./charts";
-import { fmt, theme, verdictColor } from "./theme";
+import { channelColor, fmt, theme, verdictColor } from "./theme";
 import { Card, Chip, DataTable } from "./ui";
 import {
   HistogramBar,
@@ -116,14 +116,73 @@ export function FamilyNotScored(props: { family: string }) {
   );
 }
 
+// One shared legend for every histogram on the tab. Clicking a topic
+// isolates its series across all plots; clicking it again shows everything.
+function ChannelLegendBar(props: {
+  channels: string[];
+  active: string | null;
+  onPick: (channel: string | null) => void;
+}) {
+  const { channels, active, onPick } = props;
+  if (channels.length < 2) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+      {channels.map((channel) => {
+        const isActive = active === channel;
+        const dimmed = active !== null && !isActive;
+        return (
+          <button
+            key={channel}
+            onClick={() => onPick(isActive ? null : channel)}
+            title={isActive ? "Show all channels" : `Show only ${channel}`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              background: isActive ? `${channelColor(channels, channel)}22` : "transparent",
+              border: `1px solid ${isActive ? channelColor(channels, channel) : theme.cardBorder}`,
+              borderRadius: 12,
+              padding: "2px 9px",
+              fontSize: 11,
+              color: dimmed ? theme.textDim : theme.text,
+              opacity: dimmed ? 0.55 : 1,
+              cursor: "pointer",
+              transition: "opacity 120ms, border-color 120ms, background 120ms",
+            }}
+          >
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 2,
+                background: channelColor(channels, channel),
+              }}
+            />
+            {channel}
+          </button>
+        );
+      })}
+      <span style={{ fontSize: 10.5, color: theme.textDim }}>
+        {active ? "showing one channel · click again for all" : "click a channel to isolate it"}
+      </span>
+    </div>
+  );
+}
+
 export function MotionTab(props: {
   data: PanelData;
   onOpen: (id: string) => void;
   onShow: ShowEpisodes;
 }) {
   const { data, onShow } = props;
+  const [activeChannel, setActiveChannel] = React.useState<string | null>(null);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <ChannelLegendBar
+        channels={data.channels}
+        active={activeChannel}
+        onPick={setActiveChannel}
+      />
       <div
         style={{
           display: "grid",
@@ -149,6 +208,8 @@ export function MotionTab(props: {
             >
               <MetricHistogram
                 data={hist}
+                allChannels={data.channels}
+                filterChannel={activeChannel}
                 warnThresholds={thresholds}
                 onBarClick={(bar, channel) => {
                   const bars = hist.bars;
