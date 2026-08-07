@@ -209,14 +209,15 @@ Both models need a real corpus to fit against (`n < 2` returns all-NaN) and
 get more meaningful with more episodes — a handful of samples will produce
 noisy, low-confidence outlier scores.
 
-**There is no per-channel selection for outliers.** Both models are fit on
-the batch's already-computed `quality.*` scalars (motion + health metrics),
-not on per-channel raw feature vectors. An earlier form offered a channel
-multi-select, but since the selection changed nothing it was replaced with a
-plain notice — re-adding a real picker is backlogged behind wiring
-per-channel features into the models. The **Outliers** toggle itself is
-fully functional: unchecking it skips fitting both models entirely and
-removes them from `overall_score`.
+**There is no outlier-specific channel selection.** Both models are fit on
+the batch's already-computed quality scalars — since `config_version` 3
+that includes each motion channel's per-channel values plus the health
+metrics, so the motion multi-select in the scorer form already controls
+which channels contribute features. (An earlier form offered a separate
+channel multi-select whose selection changed nothing; it was replaced with
+a plain notice.) The **Outliers** toggle itself is fully functional:
+unchecking it skips fitting both models entirely and removes them from
+`overall_score`.
 
 ## Bulk triage
 
@@ -372,5 +373,7 @@ the as-built plugin diverges and why — the code is the source of truth:
   engine's decode path doesn't support camera channels yet (it would need a
   lightweight timestamp-only read instead of a full frame decode), so
   they're left out of the picker rather than offered and quietly no-op'd.
-- **Outliers have no per-channel features** — both models are fit on the
-  batch's `quality.*` scalars; see [The Outliers tab](#the-outliers-tab).
+- **Outliers have no channel picker of their own** — the models consume
+  every computed quality scalar (per-channel motion + health); which
+  channels contribute is controlled by the motion/health selections; see
+  [The Outliers tab](#the-outliers-tab).

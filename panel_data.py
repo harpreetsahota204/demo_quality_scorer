@@ -10,11 +10,14 @@ exactly one backend call per refresh.
 import numpy as np
 
 from .engine import normalize
-from .engine.score import channel_key, higher_is_worse
+from .engine.score import (
+    HEALTH_METRIC_NAMES as HEALTH_METRICS,
+    MOTION_METRIC_NAMES as MOTION_METRICS,
+    channel_key,
+    higher_is_worse,
+)
 from .operators import RUN_KEY
 
-MOTION_METRICS = ("sparc", "ldlj", "jerk_rms", "psd_lf_hf")
-HEALTH_METRICS = ("dropout", "desync_ms", "clock_drift_ppm", "rate_cov", "clipping_frac")
 HISTOGRAM_BINS = 20
 
 # Pseudo-channel used for scores written before per-channel motion metrics
@@ -170,28 +173,21 @@ def _histogram(rows, channels, metric):
     overlayable; for unit-incompatible channels the shared axis is wide but
     still correct.
     """
-    values_by_channel = {
-        channel: [
-            v
-            for r in rows
-            for v in [r["by_channel"].get(channel, {}).get(metric)]
-            if v is not None
-        ]
-        for channel in channels
-    }
+    values_by_channel = {}
+    for channel in channels:
+        values = (r["by_channel"].get(channel, {}).get(metric) for r in rows)
+        values_by_channel[channel] = [v for v in values if v is not None]
+
     pooled = [v for values in values_by_channel.values() for v in values]
     if not pooled:
         return {"channels": [], "bars": []}
 
     _, edges = np.histogram(np.asarray(pooled, dtype=np.float64), bins=HISTOGRAM_BINS)
-    counts_by_channel = {
-        channel: np.histogram(np.asarray(values, dtype=np.float64), bins=edges)[0]
-        if values
-        else np.zeros(len(edges) - 1, dtype=int)
-        for channel, values in values_by_channel.items()
-    }
-
     present = [c for c in channels if values_by_channel[c]]
+    counts_by_channel = {
+        channel: np.histogram(np.asarray(values_by_channel[channel], dtype=np.float64), bins=edges)[0]
+        for channel in present
+    }
     return {
         "channels": present,
         "bars": [

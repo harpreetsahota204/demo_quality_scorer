@@ -164,17 +164,18 @@ class ComputeEpisodeQuality(foo.Operator):
         inputs.bool("outliers_enabled", label="Outliers", default=True)
         outliers_enabled = ctx.params.get("outliers_enabled", True)
         if outliers_enabled:
-            # No channel picker here on purpose: an earlier version offered
-            # one, but both models are fit on the batch's already-computed
-            # quality scalars, so the selection changed nothing. A live
-            # control that does nothing is worse than an honest notice;
-            # re-add the picker if/when per-channel features get wired up.
+            # No channel picker here on purpose: both models are fit on
+            # every already-computed quality scalar (per-channel motion +
+            # health), so there's no outlier-specific channel choice to
+            # make -- the motion multi-select above already controls which
+            # channels contribute features.
             inputs.view(
                 "outliers_info",
                 types.Notice(
                     label=(
                         "Isolation forest + kNN manifold distance, fit on every "
-                        "computed quality scalar (motion + health) across the batch."
+                        "computed quality scalar (per-channel motion + health) "
+                        "across the batch."
                     )
                 ),
             )

@@ -27,13 +27,14 @@ MOTION_METRICS = (
     ("psd_lf_hf", motion.psd_lf_hf),
 )
 MOTION_METRIC_NAMES = tuple(name for name, _ in MOTION_METRICS)
+HEALTH_METRIC_NAMES = ("dropout", "desync_ms", "clock_drift_ppm", "rate_cov", "clipping_frac")
 
 # Metrics that roll up into the worst-first `overall_score` / `n_flags`.
 # idle_frac/saturation_frac are surfaced for context but aren't inherently
 # "bad" at any level, so they're excluded from the aggregate.
 AGGREGATE_METRICS = frozenset(
     set(MOTION_METRIC_NAMES)
-    | {f"health.{name}" for name in ("dropout", "rate_cov", "clock_drift_ppm", "clipping_frac", "desync_ms")}
+    | {f"health.{name}" for name in HEALTH_METRIC_NAMES}
     | {"iforest_score", "knn_dist"}
 )
 
@@ -349,10 +350,10 @@ def finalize_batch(raw_by_id, outliers_enabled=True):
                 continue
             z_by_metric[name] = worst_z
             motion_worst_channel[name] = worst_topic
-            channel_scalars = raw.motion_by_channel[worst_topic]
-            scalars[name] = channel_scalars[name]
-            if f"{name}_p95" in channel_scalars:
-                scalars[f"{name}_p95"] = channel_scalars[f"{name}_p95"]
+            worst_scalars = raw.motion_by_channel[worst_topic]
+            scalars[name] = worst_scalars[name]
+            if f"{name}_p95" in worst_scalars:
+                scalars[f"{name}_p95"] = worst_scalars[f"{name}_p95"]
 
         # Context-only activity scalars: max across channels (most notable)
         for name in ("idle_frac", "saturation_frac"):

@@ -1,7 +1,6 @@
 /** Colors tuned to the FiftyOne App's dark theme. */
 export const theme = {
   accent: "#ff6d04", // FiftyOne orange
-  bg: "transparent",
   card: "#1f1f1f",
   cardBorder: "#333",
   text: "#e0e0e0",

@@ -329,5 +329,3 @@ export function OutliersTab(props: { data: PanelData; onOpen: (id: string) => vo
     </Card>
   );
 }
-
-export type { QualityRow };
