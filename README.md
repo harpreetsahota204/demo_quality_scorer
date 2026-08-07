@@ -45,26 +45,41 @@ frontend (`src/`), rebuild with `npm install && npm run build` (or
    `.mcap`/`.bag`/`.rrd` samples).
 2. Run **Compute episode quality** from the Operator Browser, or click
    "Compute episode quality" from inside the (empty) Episode Quality panel.
-3. The form is organized by **metric family**, each independently
-   toggleable:
+3. The form is organized by **metric family**, one tab per family (Motion /
+   Sensor health / Outliers). Each tab holds that family's enable checkbox
+   and settings; selections persist when you switch tabs, and the
+   validation line below the tabs always reflects all three families.
+   Inside each family every individual metric is a checkbox row with a
+   short description:
    - **Motion smoothness** — auto-checked when the first sample has at
      least one telemetry channel carrying a numeric (speed-derivable)
-     signal, with a multi-select of which channels carry motion
-     (default: all eligible channels — e.g. both arms of a bimanual rig).
-     Each selected channel is scored independently and the worst channel
-     per metric drives the episode's score (see [the worst-of
-     rationale](#why-worst-of-across-channels)). Also `idle_alpha`
-     (idle-speed threshold, as a fraction of the episode's own median
-     speed — default `0.05`) and `jerk_cutoff_hz` (RMS-jerk pre-filter
-     cutoff — default `10.0`). Auto-unchecked with a visible reason if no
-     such channel exists (e.g. a camera-only episode).
-   - **Sensor health** — on by default, multi-select of every discovered
-     channel (default: all of them).
-   - **Outliers** — on by default. There's no channel picker: both models
-     are fit on the batch's already-computed quality scalars (see [The
-     Outliers tab](#the-outliers-tab)).
-   - Window length / overlap, if you want something other than the
-     defaults (2s windows, 50% overlap).
+     signal, with a multi-select of which channels carry motion. The
+     picker starts empty — add channels from the dropdown (each picked
+     topic leaves the dropdown, so you can't add one twice; e.g. add both
+     arms of a bimanual rig). Each selected channel is scored
+     independently and the worst channel per metric drives the episode's
+     score (see [the worst-of rationale](#why-worst-of-across-channels)).
+     The four metric checkboxes (SPARC / LDLJ / Jerk RMS / PSD ratio,
+     all on by default) carry validity notes from the literature — SPARC
+     is the most noise-robust and validated; LDLJ and jerk are
+     noise-sensitive, so deselect them on noisy telemetry. Deselected
+     metrics are simply absent from `quality.*` and the overall score
+     renormalizes over what's left. Windowing (window length / overlap,
+     defaults 2s / 50%), `idle_alpha` (default `0.05`), and
+     `jerk_cutoff_hz` (default `10.0`, shown only while Jerk RMS is
+     selected) live inside this section because windows only affect
+     motion — health uses full-episode timestamps and outliers use
+     episode scalars. Auto-unchecked with a visible reason if no numeric
+     channel exists (e.g. a camera-only episode).
+   - **Sensor health** — on by default; same empty-start multi-select of
+     the discovered channels, plus five metric checkboxes (dropout, rate
+     stability, clock drift, clipping, cross-channel desync).
+   - **Outliers** — on by default, with a channel picker of its own:
+     since the models consume per-channel motion features, you can
+     restrict which channels' features feed them (leave empty for all
+     selected motion channels; health features are episode-wide and
+     always contribute). With Motion disabled the picker disappears and
+     a notice explains the models fall back to health features only.
 
    A validation line above **Run** explains what will and won't be
    computed and why (e.g. "Motion: skipped, no telemetry channel carries a
@@ -209,15 +224,15 @@ Both models need a real corpus to fit against (`n < 2` returns all-NaN) and
 get more meaningful with more episodes — a handful of samples will produce
 noisy, low-confidence outlier scores.
 
-**There is no outlier-specific channel selection.** Both models are fit on
-the batch's already-computed quality scalars — since `config_version` 3
-that includes each motion channel's per-channel values plus the health
-metrics, so the motion multi-select in the scorer form already controls
-which channels contribute features. (An earlier form offered a separate
-channel multi-select whose selection changed nothing; it was replaced with
-a plain notice.) The **Outliers** toggle itself is fully functional:
-unchecking it skips fitting both models entirely and removes them from
-`overall_score`.
+**Outlier channel selection is real.** Both models are fit on the batch's
+already-computed quality scalars — each selected motion channel's
+per-channel values plus the health metrics. The form's outlier channel
+picker restricts which channels' motion feature columns feed the models
+(leave it empty for all selected motion channels); health features are
+episode-wide medians, so they always contribute. Normalization stats and
+z-scores are never affected by this filter — it only changes what the
+outlier models see. The **Outliers** toggle itself skips fitting both
+models entirely and removes them from `overall_score`.
 
 ## Bulk triage
 
@@ -373,7 +388,6 @@ the as-built plugin diverges and why — the code is the source of truth:
   engine's decode path doesn't support camera channels yet (it would need a
   lightweight timestamp-only read instead of a full frame decode), so
   they're left out of the picker rather than offered and quietly no-op'd.
-- **Outliers have no channel picker of their own** — the models consume
-  every computed quality scalar (per-channel motion + health); which
-  channels contribute is controlled by the motion/health selections; see
+- **Outlier feature selection is channel-level only** — you can pick which
+  channels feed the models, but not individual features (metrics); see
   [The Outliers tab](#the-outliers-tab).

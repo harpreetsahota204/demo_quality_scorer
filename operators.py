@@ -10,11 +10,88 @@ from . import debug
 from .engine import activity, windowing
 from .engine.decode import has_numeric_signal
 from .engine.discovery import SCALAR_SIDECAR, TELEMETRY, discover_channels
-from .engine.score import CONFIG_VERSION, compute_raw_episode_metrics, finalize_batch
+from .engine.score import (
+    CONFIG_VERSION,
+    compute_raw_episode_metrics,
+    finalize_batch,
+)
 from .write import build_temporal_tags, clear_temporal_tags, write_sample
 
 DELEGATION_THRESHOLD = 50
 RUN_KEY = "demo_quality_scorer"
+
+# Per-metric checkbox rows: (key, label, short description). Research notes
+# follow the smoothness-metric literature: SPARC is the most validated and
+# noise-robust (Balasubramanian 2015; stroke reaching review 2021); jerk-
+# based metrics are noise/duration-sensitive.
+MOTION_METRIC_ROWS = (
+    (
+        "sparc",
+        "SPARC — spectral arc length",
+        "Frequency-domain smoothness. The most validated and noise-robust "
+        "of the four (recommended to keep on).",
+    ),
+    (
+        "ldlj",
+        "LDLJ — log dimensionless jerk",
+        "Duration/amplitude-normalized jerk. Sensitive to sensor noise — "
+        "consider deselecting on noisy telemetry.",
+    ),
+    (
+        "jerk_rms",
+        "Jerk RMS",
+        "Raw jerk intensity (low-pass filtered first). Not scale-invariant; "
+        "down-weighted 0.3x in the overall score.",
+    ),
+    (
+        "psd_lf_hf",
+        "PSD low/high ratio",
+        "Share of motion energy in slow vs high-frequency bands (this "
+        "plugin's own Welch band ratio).",
+    ),
+)
+
+HEALTH_METRIC_ROWS = (
+    ("dropout", "Dropout", "Fraction of inter-message gaps over 3x the expected interval."),
+    ("rate_cov", "Rate stability", "Coefficient of variation of message inter-arrival times."),
+    ("clock_drift_ppm", "Clock drift", "log_time vs publish_time drift trend, in ppm (magnitude only)."),
+    ("clipping_frac", "Clipping", "Fraction of samples pinned at their observed min/max (heuristic)."),
+    ("desync_ms", "Cross-channel desync", "Worst pairwise timestamp offset; needs at least 2 channels."),
+)
+
+
+def _selected_metrics(cfg, rows):
+    """The metric keys from ``rows`` whose checkboxes are on in a family's params."""
+    return [key for key, _, _ in rows if cfg.get(f"metric_{key}", True)]
+
+
+def _add_metric_checkboxes(section, rows):
+    for key, label, description in rows:
+        section.bool(
+            f"metric_{key}",
+            label=label,
+            description=description,
+            default=True,
+            view=types.CheckboxView(),
+        )
+
+
+def _channel_picker(section, name, choices, selected, **field_kwargs):
+    """A multi-select whose dropdown omits already-picked topics.
+
+    Starts empty (an explicit pick beats a wall of pre-added pills); the
+    choice list is rebuilt minus the current selection on every dynamic
+    re-resolve, so a picked topic can't be added twice.
+
+    Args:
+        choices: a list of ``(topic, display_label)`` tuples
+        selected: the currently-selected topics (from ``ctx.params``)
+    """
+    view = types.AutocompleteView()
+    for topic, label in choices:
+        if topic not in selected:
+            view.add_choice(topic, label=label)
+    section.list(name, types.String(), default=[], view=view, **field_kwargs)
 
 
 # `dynamic=True` re-runs resolve_input on every form interaction, and
@@ -95,27 +172,73 @@ class ComputeEpisodeQuality(foo.Operator):
             has_motion=has_motion,
         )
 
-        # --- Motion smoothness -------------------------------------------
-        inputs.bool(
-            "motion_enabled",
-            label="Motion smoothness",
-            description=(
-                "SPARC, LDLJ, jerk RMS, PSD band ratio, idle/saturation fraction"
-                if has_motion
-                else "Skipped: no telemetry channel carries a numeric (speed-derivable) signal"
-            ),
-            default=has_motion,
-        )
+        # One tab per metric family. Only the active tab's fields are
+        # rendered, but values persist in ctx.params across tab switches
+        # (dynamic=True re-resolves the form on every change), and the
+        # validation line below the tabs always reflects all families.
+        # Tabs already separate the families visually, so sections are plain
+        # vertical stacks (no outlined container) -- the nested object is
+        # kept purely for param namespacing (ctx.params["motion_cfg"][...])
+        def _section(name):
+            prop = inputs.obj(name, view=types.GridView(orientation="vertical", gap=2))
+            return prop.type
+
+        # Selections are read from ctx.params up front (not inside the
+        # render branches) so validation covers families on inactive tabs
+        motion_cfg = ctx.params.get("motion_cfg") or {}
+        health_cfg = ctx.params.get("health_cfg") or {}
+        outliers_cfg = ctx.params.get("outliers_cfg") or {}
+
         motion_enabled = has_motion and ctx.params.get("motion_enabled", has_motion)
-        motion_sources = []
-        if motion_enabled:
-            mc = types.AutocompleteView()
-            for c in motion_candidates:
-                mc.add_choice(c.topic, label=f"{c.topic} ({c.schema_name})")
-            inputs.list(
+        eligible_motion = {c.topic for c in motion_candidates}
+        motion_sources = [t for t in (motion_cfg.get("motion_sources") or []) if t in eligible_motion]
+        motion_metrics = _selected_metrics(motion_cfg, MOTION_METRIC_ROWS)
+
+        health_enabled = ctx.params.get("health_enabled", True)
+        eligible_health = {c.topic for c in disc}
+        health_channels = [t for t in (health_cfg.get("health_channels") or []) if t in eligible_health]
+        health_metrics = _selected_metrics(health_cfg, HEALTH_METRIC_ROWS)
+
+        outliers_enabled = ctx.params.get("outliers_enabled", True)
+
+        tabs = types.TabsView()
+        tabs.add_choice("MOTION", label="Motion")
+        tabs.add_choice("HEALTH", label="Sensor health")
+        tabs.add_choice("OUTLIERS", label="Outliers")
+        inputs.enum("family_tab", tabs.values(), default="MOTION", view=tabs)
+        active_tab = ctx.params.get("family_tab", "MOTION")
+
+        # --- Motion smoothness -------------------------------------------
+        if active_tab == "MOTION":
+            inputs.bool(
+                "motion_enabled",
+                label="Motion smoothness",
+                description=(
+                    "Smoothness of the robot's motion, per channel, worst channel drives the score"
+                    if has_motion
+                    else "Skipped: no telemetry channel carries a numeric (speed-derivable) signal"
+                ),
+                default=has_motion,
+            )
+        if active_tab == "MOTION" and motion_enabled:
+            section = _section("motion_cfg")
+
+            # Metrics first (what to compute), channels second (where)
+            section.view(
+                "motion_metrics_header",
+                types.Header(
+                    label="Metrics",
+                    description="Each is computed on every selected channel's speed profile",
+                ),
+            )
+            _add_metric_checkboxes(section, MOTION_METRIC_ROWS)
+
+            section.view("motion_channels_header", types.Header(label="Channels"))
+            _channel_picker(
+                section,
                 "motion_sources",
-                types.String(),
-                default=[c.topic for c in motion_candidates],
+                [(c.topic, f"{c.topic} ({c.schema_name})") for c in motion_candidates],
+                motion_sources,
                 required=True,
                 label="Which channels carry motion?",
                 description=(
@@ -123,71 +246,120 @@ class ComputeEpisodeQuality(foo.Operator):
                     "against its own dataset-wide stats; the worst channel "
                     "per metric drives the episode's score."
                 ),
-                view=mc,
             )
-            motion_sources = ctx.params.get("motion_sources") or [c.topic for c in motion_candidates]
-            inputs.float(
+
+            section.view(
+                "motion_windowing_header",
+                types.Header(
+                    label="Windowing",
+                    description=(
+                        "Motion metrics are computed per window, then summarized per "
+                        "episode (median + p95). Windows only affect this family: health "
+                        "uses full-episode timestamps, outliers use episode scalars."
+                    ),
+                ),
+            )
+            section.float(
+                "win_s",
+                default=windowing.WINDOW_S,
+                label="Window length (s)",
+                description="Shorter windows localize flags more precisely but get noisier.",
+                min=0.5,
+            )
+            section.float(
+                "overlap",
+                default=windowing.OVERLAP,
+                label="Window overlap",
+                description="Fraction of overlap between consecutive windows (0 to 0.9).",
+                min=0.0,
+                max=0.9,
+            )
+            section.float(
                 "idle_alpha",
                 default=activity.IDLE_ALPHA_DEFAULT,
                 label="Idle threshold (x median speed)",
                 description="Fraction of the episode's own median speed that counts as idle.",
                 min=0.0,
             )
-            inputs.float(
-                "jerk_cutoff_hz",
-                default=10.0,
-                label="Jerk pre-filter cutoff (Hz)",
-                description="Low-pass cutoff applied before differentiating for RMS jerk.",
-                min=0.1,
-            )
+            if "jerk_rms" in motion_metrics:
+                section.float(
+                    "jerk_cutoff_hz",
+                    default=10.0,
+                    label="Jerk pre-filter cutoff (Hz)",
+                    description="Low-pass cutoff applied before differentiating for RMS jerk.",
+                    min=0.1,
+                )
 
         # --- Sensor health -------------------------------------------------
-        inputs.bool("health_enabled", label="Sensor health", default=True)
-        health_enabled = ctx.params.get("health_enabled", True)
-        health_channels = []
-        if health_enabled:
-            ch = types.AutocompleteView()
-            for c in disc:
-                ch.add_choice(c.topic, label=f"{c.topic} ({c.schema_name})")
-            inputs.list(
-                "health_channels",
-                types.String(),
-                default=[c.topic for c in disc],
-                required=True,
-                label="Which channels to check?",
-                description="Dropout, desync, clock drift, rate stability, clipping.",
-                view=ch,
+        if active_tab == "HEALTH":
+            inputs.bool(
+                "health_enabled",
+                label="Sensor health",
+                description="Timestamp- and value-level channel health, no motion needed",
+                default=True,
             )
-            health_channels = ctx.params.get("health_channels") or [c.topic for c in disc]
+        if active_tab == "HEALTH" and health_enabled:
+            section = _section("health_cfg")
 
-        # --- Outliers --------------------------------------------------
-        inputs.bool("outliers_enabled", label="Outliers", default=True)
-        outliers_enabled = ctx.params.get("outliers_enabled", True)
-        if outliers_enabled:
-            # No channel picker here on purpose: both models are fit on
-            # every already-computed quality scalar (per-channel motion +
-            # health), so there's no outlier-specific channel choice to
-            # make -- the motion multi-select above already controls which
-            # channels contribute features.
-            inputs.view(
-                "outliers_info",
-                types.Notice(
-                    label=(
-                        "Isolation forest + kNN manifold distance, fit on every "
-                        "computed quality scalar (per-channel motion + health) "
-                        "across the batch."
-                    )
+            section.view(
+                "health_metrics_header",
+                types.Header(
+                    label="Metrics",
+                    description="Computed from raw message timestamps and values",
                 ),
             )
+            _add_metric_checkboxes(section, HEALTH_METRIC_ROWS)
 
-        inputs.float("win_s", default=windowing.WINDOW_S, label="Window length (s)", min=0.5)
-        inputs.float(
-            "overlap",
-            default=windowing.OVERLAP,
-            label="Window overlap",
-            description="Fraction of overlap between consecutive windows.",
-            view=types.SliderView(min=0.0, max=0.9),
-        )
+            section.view("health_channels_header", types.Header(label="Channels"))
+            _channel_picker(
+                section,
+                "health_channels",
+                [(c.topic, f"{c.topic} ({c.schema_name})") for c in disc],
+                health_channels,
+                required=True,
+                label="Which channels to check?",
+            )
+
+        # --- Outliers --------------------------------------------------
+        if active_tab == "OUTLIERS":
+            inputs.bool(
+                "outliers_enabled",
+                label="Outliers",
+                description="Isolation forest + kNN manifold distance across the batch",
+                default=True,
+            )
+        if active_tab == "OUTLIERS" and outliers_enabled:
+            section = _section("outliers_cfg")
+            if motion_sources:
+                # Genuinely wired: selected channels' per-channel motion
+                # features are the columns the models consume. Health
+                # features are episode-wide medians (not per-channel), so
+                # they always contribute and aren't selectable here.
+                selected_outlier = [
+                    t for t in (outliers_cfg.get("outlier_channels") or []) if t in motion_sources
+                ]
+                _channel_picker(
+                    section,
+                    "outlier_channels",
+                    [(topic, topic) for topic in motion_sources],
+                    selected_outlier,
+                    label="Which channels' motion features feed the models?",
+                    description=(
+                        "Leave empty to use all selected motion channels. Health "
+                        "features are episode-wide and always contribute."
+                    ),
+                )
+            else:
+                section.view(
+                    "outliers_info",
+                    types.Notice(
+                        label=(
+                            "Models are fit on episode-wide health features only. "
+                            "Select motion channels on the Motion tab to unlock "
+                            "per-channel feature selection here."
+                        )
+                    ),
+                )
 
         inputs.view(
             "validation",
@@ -196,8 +368,10 @@ class ComputeEpisodeQuality(foo.Operator):
                     has_motion,
                     motion_enabled,
                     len(motion_sources),
+                    len(motion_metrics),
                     health_enabled,
                     len(health_channels),
+                    len(health_metrics),
                     outliers_enabled,
                 )
             ),
@@ -206,19 +380,28 @@ class ComputeEpisodeQuality(foo.Operator):
         return types.Property(inputs, view=types.View(label="Compute episode quality"))
 
     def execute(self, ctx):
-        win_s = ctx.params.get("win_s") or windowing.WINDOW_S
-        overlap = ctx.params.get("overlap")
+        # Per-family settings live in nested section objects (see resolve_input)
+        motion_cfg = ctx.params.get("motion_cfg") or {}
+        health_cfg = ctx.params.get("health_cfg") or {}
+        outliers_cfg = ctx.params.get("outliers_cfg") or {}
+
+        win_s = motion_cfg.get("win_s") or windowing.WINDOW_S
+        overlap = motion_cfg.get("overlap")
         overlap = windowing.OVERLAP if overlap is None else overlap
 
         motion_enabled = ctx.params.get("motion_enabled", False)
-        motion_topics = (ctx.params.get("motion_sources") or []) if motion_enabled else []
-        idle_alpha = ctx.params.get("idle_alpha") or activity.IDLE_ALPHA_DEFAULT
-        jerk_cutoff_hz = ctx.params.get("jerk_cutoff_hz") or 10.0
+        motion_topics = (motion_cfg.get("motion_sources") or []) if motion_enabled else []
+        motion_metrics = _selected_metrics(motion_cfg, MOTION_METRIC_ROWS)
+        idle_alpha = motion_cfg.get("idle_alpha") or activity.IDLE_ALPHA_DEFAULT
+        jerk_cutoff_hz = motion_cfg.get("jerk_cutoff_hz") or 10.0
 
         health_enabled = ctx.params.get("health_enabled", True)
-        health_topics = set(ctx.params.get("health_channels") or []) if health_enabled else set()
+        health_topics = set(health_cfg.get("health_channels") or []) if health_enabled else set()
+        health_metrics = _selected_metrics(health_cfg, HEALTH_METRIC_ROWS)
 
         outliers_enabled = ctx.params.get("outliers_enabled", True)
+        # Empty selection means "all selected motion channels" (engine: None)
+        outlier_channels = outliers_cfg.get("outlier_channels") or None
 
         view = ctx.target_view()
         n = len(view)
@@ -226,8 +409,11 @@ class ComputeEpisodeQuality(foo.Operator):
             ctx,
             "execute.start",
             motion_topics=sorted(motion_topics),
+            motion_metrics=motion_metrics,
             health_topics=sorted(health_topics),
+            health_metrics=health_metrics,
             outliers_enabled=outliers_enabled,
+            outlier_channels=outlier_channels,
             win_s=win_s,
             overlap=overlap,
             n_samples=n,
@@ -240,6 +426,8 @@ class ComputeEpisodeQuality(foo.Operator):
                 sample.filepath,
                 motion_topics=motion_topics,
                 health_topics=health_topics,
+                motion_metrics=motion_metrics,
+                health_metrics=health_metrics,
                 win_s=win_s,
                 overlap=overlap,
                 idle_alpha=idle_alpha,
@@ -255,7 +443,9 @@ class ComputeEpisodeQuality(foo.Operator):
             )
             yield ctx.trigger("set_progress", {"progress": (i + 1) / n, "label": f"Scored {i + 1}/{n}"})
 
-        results, norm_stats = finalize_batch(raw_by_id, outliers_enabled=outliers_enabled)
+        results, norm_stats = finalize_batch(
+            raw_by_id, outliers_enabled=outliers_enabled, outlier_channels=outlier_channels
+        )
         self._debug(
             ctx,
             "execute.finalized",
@@ -279,8 +469,11 @@ class ComputeEpisodeQuality(foo.Operator):
         _register_run(
             ctx.dataset,
             motion_topics=motion_topics,
+            motion_metrics=motion_metrics,
             health_topics=health_topics,
+            health_metrics=health_metrics,
             outliers_enabled=outliers_enabled,
+            outlier_channels=outlier_channels,
             win_s=win_s,
             overlap=overlap,
             idle_alpha=idle_alpha,
@@ -317,24 +510,41 @@ class ComputeEpisodeQuality(foo.Operator):
 
 
 def _build_validation_line(
-    has_motion, motion_enabled, n_motion_channels, health_enabled, n_health_channels, outliers_enabled
+    has_motion,
+    motion_enabled,
+    n_motion_channels,
+    n_motion_metrics,
+    health_enabled,
+    n_health_channels,
+    n_health_metrics,
+    outliers_enabled,
 ):
     """Builds the soft-warn validation strip's text: never blocks Run, just explains skips."""
     parts = []
 
     if not has_motion:
         parts.append("Motion: skipped, no telemetry channel carries a numeric signal")
-    elif motion_enabled:
-        parts.append(f"Motion: enabled on {n_motion_channels} channel(s), scored worst-of")
-    else:
+    elif not motion_enabled:
         parts.append("Motion: skipped by selection")
+    elif n_motion_channels == 0:
+        parts.append("Motion: no channels selected yet (Motion tab)")
+    elif n_motion_metrics == 0:
+        parts.append("Motion: no metrics selected -- family will compute nothing")
+    else:
+        parts.append(
+            f"Motion: {n_motion_metrics} metric(s) on {n_motion_channels} channel(s), scored worst-of"
+        )
 
-    if health_enabled:
-        parts.append(f"Sensor health: enabled on {n_health_channels} channel(s)")
+    if not health_enabled:
+        parts.append("Sensor health: skipped by selection")
+    elif n_health_channels == 0:
+        parts.append("Sensor health: no channels selected yet (Sensor health tab)")
+    elif n_health_metrics == 0:
+        parts.append("Sensor health: no metrics selected -- family will compute nothing")
+    else:
+        parts.append(f"Sensor health: {n_health_metrics} metric(s) on {n_health_channels} channel(s)")
         if n_health_channels < 2:
             parts.append("Desync: unavailable, needs >=2 health channels to compare")
-    else:
-        parts.append("Sensor health: skipped by selection")
 
     parts.append("Outliers: enabled" if outliers_enabled else "Outliers: skipped by selection")
 
@@ -347,8 +557,11 @@ def _build_validation_line(
 def _register_run(
     dataset,
     motion_topics,
+    motion_metrics,
     health_topics,
+    health_metrics,
     outliers_enabled,
+    outlier_channels,
     win_s,
     overlap,
     idle_alpha,
@@ -357,8 +570,11 @@ def _register_run(
 ):
     cfg = dataset.init_run(
         motion_topics=sorted(motion_topics),
+        motion_metrics=list(motion_metrics),
         health_topics=sorted(health_topics),
+        health_metrics=list(health_metrics),
         outliers_enabled=outliers_enabled,
+        outlier_channels=sorted(outlier_channels) if outlier_channels else None,
         win_s=win_s,
         overlap=overlap,
         idle_alpha=idle_alpha,

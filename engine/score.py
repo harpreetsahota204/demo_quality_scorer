@@ -110,6 +110,8 @@ def compute_raw_episode_metrics(
     filepath,
     motion_topics=(),
     health_topics=(),
+    motion_metrics=MOTION_METRIC_NAMES,
+    health_metrics=HEALTH_METRIC_NAMES,
     win_s=windowing.WINDOW_S,
     overlap=windowing.OVERLAP,
     idle_alpha=activity.IDLE_ALPHA_DEFAULT,
@@ -120,7 +122,10 @@ def compute_raw_episode_metrics(
     Motion and health are scored over independently-selectable channel sets
     (a family the operator's form let the user uncheck contributes nothing
     here, rather than being filtered out later): pass `motion_topics=()`
-    and/or `health_topics=()` to skip either family entirely.
+    and/or `health_topics=()` to skip either family entirely. Within a
+    family, `motion_metrics`/`health_metrics` select which individual
+    metrics to compute -- a deselected metric is simply absent from the
+    output (and `normalize.aggregate` renormalizes over what's present).
 
     Args:
         filepath: path to the episode's MCAP file
@@ -132,7 +137,12 @@ def compute_raw_episode_metrics(
         health_topics: the channel topics to run sensor-health metrics
             (dropout, rate stability, clock drift, clipping, pairwise
             desync) on; empty to skip the Health family
-        win_s: window length, in seconds
+        motion_metrics: which motion metrics to compute, a subset of
+            :data:`MOTION_METRIC_NAMES`
+        health_metrics: which health metrics to compute, a subset of
+            :data:`HEALTH_METRIC_NAMES`
+        win_s: window length, in seconds (motion windows only; health
+            metrics use the episode's full message stream)
         overlap: fractional overlap between consecutive windows
         idle_alpha (0.05): idle-speed threshold, as a fraction of each
             channel+group's own median speed (see
@@ -145,6 +155,8 @@ def compute_raw_episode_metrics(
     """
     motion_topics = set(motion_topics)
     health_topics = set(health_topics)
+    motion_metrics = set(motion_metrics)
+    health_metrics = set(health_metrics)
     needed_topics = health_topics | motion_topics
 
     channels = {
@@ -165,20 +177,27 @@ def compute_raw_episode_metrics(
         if not records:
             continue
 
-        _, dropout, rate_cov = health.rate_stats(records)
-        drift = health.clock_drift_ppm(records)
-        _append_if_finite(health_values, "dropout", dropout)
-        _append_if_finite(health_values, "rate_cov", rate_cov)
-        _append_if_finite(health_values, "clock_drift_ppm", abs(drift) if not np.isnan(drift) else drift)
+        if {"dropout", "rate_cov"} & health_metrics:
+            _, dropout, rate_cov = health.rate_stats(records)
+            if "dropout" in health_metrics:
+                _append_if_finite(health_values, "dropout", dropout)
+            if "rate_cov" in health_metrics:
+                _append_if_finite(health_values, "rate_cov", rate_cov)
 
-        for field_names in windowing.field_groups(records).values():
-            _append_if_finite(health_values, "clipping_frac", health.clipping_frac(records, field_names))
+        if "clock_drift_ppm" in health_metrics:
+            drift = health.clock_drift_ppm(records)
+            _append_if_finite(health_values, "clock_drift_ppm", abs(drift) if not np.isnan(drift) else drift)
 
-    health_records = [channel_records[t] for t in health_topics if t in channel_records]
-    desyncs = [health.desync_ms(a, b) for a, b in itertools.combinations(health_records, 2)]
-    desyncs = [d for d in desyncs if not np.isnan(d)]
-    if desyncs:
-        health_values["desync_ms"].append(max(desyncs))
+        if "clipping_frac" in health_metrics:
+            for field_names in windowing.field_groups(records).values():
+                _append_if_finite(health_values, "clipping_frac", health.clipping_frac(records, field_names))
+
+    if "desync_ms" in health_metrics:
+        health_records = [channel_records[t] for t in health_topics if t in channel_records]
+        desyncs = [health.desync_ms(a, b) for a, b in itertools.combinations(health_records, 2)]
+        desyncs = [d for d in desyncs if not np.isnan(d)]
+        if desyncs:
+            health_values["desync_ms"].append(max(desyncs))
 
     for motion_topic in motion_topics:
         records = channel_records.get(motion_topic)
@@ -204,6 +223,8 @@ def compute_raw_episode_metrics(
 
                 speed = motion.speed_profile(window.vectors, group)
                 for metric_name, metric_fn in MOTION_METRICS:
+                    if metric_name not in motion_metrics:
+                        continue
                     value = (
                         metric_fn(speed, fs, jerk_cutoff_hz) if metric_name == "jerk_rms" else metric_fn(speed, fs)
                     )
@@ -240,7 +261,7 @@ def compute_raw_episode_metrics(
     )
 
 
-def finalize_batch(raw_by_id, outliers_enabled=True):
+def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
     """Normalizes a batch of episodes' raw metrics and finalizes their scores.
 
     Fits dataset-wide robust-z stats and the outlier models across every
@@ -255,6 +276,11 @@ def finalize_batch(raw_by_id, outliers_enabled=True):
             are omitted entirely (not merely excluded from the aggregate),
             since fitting them costs a pass over the whole batch that
             nobody asked for.
+        outlier_channels (None): which channels' per-channel *motion*
+            features feed the outlier models; ``None`` means all of them.
+            Health features are episode-wide medians (not per-channel), so
+            they always contribute. Only affects the models' feature
+            matrix -- normalization stats and z-scores are unaffected.
 
     Returns:
         a tuple ``(results, norm_stats)`` where ``results`` is a dict of
@@ -304,7 +330,20 @@ def finalize_batch(raw_by_id, outliers_enabled=True):
     values_by_metric = {name: feature_matrix[:, i] for i, name in enumerate(metric_names)}
 
     if outliers_enabled:
-        iforest_scores, knn_dists = outliers.fit_and_score(feature_matrix)
+        outlier_matrix = feature_matrix
+        if outlier_channels is not None:
+            allowed = set(outlier_channels)
+            cols = [
+                i
+                for i, name in enumerate(metric_names)
+                if CHANNEL_SEP not in name or name.split(CHANNEL_SEP, 1)[1] in allowed
+            ]
+            outlier_matrix = feature_matrix[:, cols]
+
+        if outlier_matrix.shape[1] == 0:
+            iforest_scores = knn_dists = np.full(len(sample_ids), np.nan)
+        else:
+            iforest_scores, knn_dists = outliers.fit_and_score(outlier_matrix)
         values_by_metric["iforest_score"] = iforest_scores
         values_by_metric["knn_dist"] = knn_dists
     episode_stats = normalize.fit(values_by_metric)

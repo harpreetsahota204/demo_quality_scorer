@@ -205,25 +205,40 @@ export function MotionTab(props: {
             <Card
               key={metric}
               title={METRIC_LABELS[metric].title}
-              subtitle={`${base} · click a bar to filter`}
+              subtitle={hist.channels.length > 0 ? `${base} · click a bar to filter` : undefined}
               info={EXPLAINERS[metric]}
             >
-              <MetricHistogram
-                data={hist}
-                allChannels={data.channels}
-                filterChannel={activeChannel}
-                warnThresholds={thresholds}
-                onBarClick={(bar, channel) => {
-                  const bars = hist.bars;
-                  const isLast = bars.length > 0 && bar.x1 === bars[bars.length - 1].x1;
-                  const hits = rowsInBin(data.rows, metric, channel, bar, isLast);
-                  const channelNote = hist.channels.length > 1 ? ` on ${channel}` : "";
-                  onShow(
-                    hits.map((r) => r.id),
-                    `${METRIC_LABELS[metric].short}${channelNote} in [${bar.x0.toPrecision(3)}, ${bar.x1.toPrecision(3)}]`
-                  );
-                }}
-              />
+              {hist.channels.length === 0 ? (
+                <div
+                  style={{
+                    height: 180,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: theme.textDim,
+                    fontSize: 12,
+                  }}
+                >
+                  Not computed in the last run (deselected or no data)
+                </div>
+              ) : (
+                <MetricHistogram
+                  data={hist}
+                  allChannels={data.channels}
+                  filterChannel={activeChannel}
+                  warnThresholds={thresholds}
+                  onBarClick={(bar, channel) => {
+                    const bars = hist.bars;
+                    const isLast = bars.length > 0 && bar.x1 === bars[bars.length - 1].x1;
+                    const hits = rowsInBin(data.rows, metric, channel, bar, isLast);
+                    const channelNote = hist.channels.length > 1 ? ` on ${channel}` : "";
+                    onShow(
+                      hits.map((r) => r.id),
+                      `${METRIC_LABELS[metric].short}${channelNote} in [${bar.x0.toPrecision(3)}, ${bar.x1.toPrecision(3)}]`
+                    );
+                  }}
+                />
+              )}
             </Card>
           );
         })}
