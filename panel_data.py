@@ -12,6 +12,7 @@ import numpy as np
 from .engine import normalize
 from .engine.score import (
     HEALTH_METRIC_NAMES as HEALTH_METRICS,
+    METRIC_WEIGHTS,
     MOTION_METRIC_NAMES as MOTION_METRICS,
     channel_key,
     higher_is_worse,
@@ -43,6 +44,7 @@ def build_panel_data(dataset, view):
         health = getattr(q, "health", None)  # absent when family disabled
         has_health = has_health or health is not None
         verdict, reason = _health_verdict(health, episode_stats)
+        by_channel = _motion_by_channel(q)
         rows.append(
             {
                 "id": sample.id,
@@ -50,7 +52,8 @@ def build_panel_data(dataset, view):
                 "overall_score": _num(q.overall_score),
                 "n_flags": q.n_flags,
                 **{name: _num(getattr(q, name, None)) for name in MOTION_METRICS},
-                "by_channel": _motion_by_channel(q),
+                "by_channel": by_channel,
+                "channel_scores": _channel_scores(by_channel, episode_stats),
                 "worst_channel": _motion_worst_channel(q),
                 "iforest_score": _num(getattr(q, "iforest_score", None)),
                 "knn_dist": _num(getattr(q, "knn_dist", None)),
@@ -156,6 +159,37 @@ def _motion_by_channel(quality_doc):
     if any(v is not None for v in legacy.values()):
         return {LEGACY_CHANNEL: legacy}
     return {}
+
+
+def _channel_scores(by_channel, episode_stats):
+    """Per-channel motion score + flag count: ``{channel: {score, n_flags}}``.
+
+    Same robust-z aggregation (and jerk_rms down-weighting) as the engine's
+    `overall_score`, but restricted to one channel's motion metrics -- the
+    ranking table sorts by this when the user isolates a channel in the
+    legend. Motion-only by construction: health/outlier metrics aren't
+    per-channel.
+    """
+    if not episode_stats:
+        return {}
+
+    scores = {}
+    for channel, values in by_channel.items():
+        z_by_metric = {}
+        for metric in MOTION_METRICS:
+            value = values.get(metric)
+            key = metric if channel == LEGACY_CHANNEL else channel_key(metric, channel)
+            stats = episode_stats.get(key)
+            if value is None or stats is None:
+                continue
+            z = normalize.zscore(value, stats, higher_is_worse(metric))
+            if not np.isnan(z):
+                z_by_metric[metric] = z
+
+        if z_by_metric:
+            score, n_flags = normalize.aggregate(z_by_metric, weights=METRIC_WEIGHTS)
+            scores[channel] = {"score": score, "n_flags": n_flags}
+    return scores
 
 
 def _motion_worst_channel(quality_doc):

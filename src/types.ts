@@ -9,6 +9,8 @@ export interface QualityRow {
   psd_lf_hf: number | null;
   /** Per-channel motion metric values: {channel: {metric: value}} */
   by_channel: Record<string, Record<string, number | null>>;
+  /** Per-channel motion-only score/flags (same z aggregation as overall_score) */
+  channel_scores: Record<string, { score: number; n_flags: number }>;
   /** Which channel's z-score drove each top-level motion value */
   worst_channel: Record<string, string>;
   iforest_score: number | null;

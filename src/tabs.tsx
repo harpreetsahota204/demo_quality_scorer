@@ -59,7 +59,9 @@ const EXPLAINERS: Record<string, string> = {
     "the episode is, so scores are comparable across metrics with different units. When " +
     "several channels are scored, each metric shows its worst channel's value (worst-of, not " +
     "averaged \u2014 a smooth arm never masks a jerky one); hover a value for the per-channel " +
-    "breakdown. Flags counts metrics at warn severity (z \u2265 2) or worse.",
+    "breakdown. Isolating a channel in the legend re-ranks the table by that channel's " +
+    "motion-only score and shows its values. Flags counts metrics at warn severity (z \u2265 2) " +
+    "or worse.",
   health_verdicts:
     "Sensor-health rollup per episode, computed from raw message timestamps and values: " +
     "dropouts, frame-rate stability, clock drift, cross-channel desync, and value clipping. " +
@@ -227,37 +229,73 @@ export function MotionTab(props: {
         })}
       </div>
 
-      <Card
-        title="Worst-first ranking"
-        subtitle="Click a row to open the episode"
-        info={EXPLAINERS.ranking}
-      >
-        <DataTable
-          columns={[
-            { key: "episode", label: "Episode" },
-            { key: "overall_score", label: "Overall", align: "right" },
-            { key: "n_flags", label: "Flags", align: "right" },
-            ...MOTION_METRICS.map((m) => ({
-              key: m,
-              label: METRIC_LABELS[m].short,
-              align: "right" as const,
-            })),
-          ]}
-          rowKeys={data.rows.map((r) => r.id)}
-          rows={data.rows.map((r) => ({
-            episode: r.episode,
-            overall_score: (
-              <span style={{ color: scoreColor(r.overall_score), fontWeight: 600 }}>
-                {fmt(r.overall_score)}
-              </span>
-            ),
-            n_flags: r.n_flags,
-            ...Object.fromEntries(MOTION_METRICS.map((m) => [m, metricCell(r, m)])),
-          }))}
-          onRowClick={props.onOpen}
-        />
-      </Card>
+      <RankingTable rows={data.rows} activeChannel={activeChannel} onOpen={props.onOpen} />
     </div>
+  );
+}
+
+// Worst-first ranking. With a channel isolated in the legend, both the
+// values and the sort key switch to that channel: metric cells show the
+// channel's own values and rows re-rank by its motion-only score (health/
+// outlier metrics aren't per-channel, so they can't contribute there).
+function RankingTable(props: {
+  rows: QualityRow[];
+  activeChannel: string | null;
+  onOpen: (id: string) => void;
+}) {
+  const { rows, activeChannel, onOpen } = props;
+
+  const channelScore = (r: QualityRow) =>
+    activeChannel ? r.channel_scores?.[activeChannel]?.score ?? null : r.overall_score;
+  const channelFlags = (r: QualityRow) =>
+    activeChannel ? r.channel_scores?.[activeChannel]?.n_flags ?? 0 : r.n_flags;
+
+  // Backend rows are pre-sorted by overall_score; re-rank client-side when
+  // a channel is isolated (episodes without that channel sink to the bottom)
+  const sorted = activeChannel
+    ? [...rows].sort((a, b) => (channelScore(b) ?? -Infinity) - (channelScore(a) ?? -Infinity))
+    : rows;
+
+  return (
+    <Card
+      title="Worst-first ranking"
+      subtitle={
+        activeChannel
+          ? `ranked by ${activeChannel} (motion metrics only) · click a row to open the episode`
+          : "Click a row to open the episode"
+      }
+      info={EXPLAINERS.ranking}
+    >
+      <DataTable
+        columns={[
+          { key: "episode", label: "Episode" },
+          { key: "overall_score", label: activeChannel ? "Motion score" : "Overall", align: "right" },
+          { key: "n_flags", label: "Flags", align: "right" },
+          ...MOTION_METRICS.map((m) => ({
+            key: m,
+            label: METRIC_LABELS[m].short,
+            align: "right" as const,
+          })),
+        ]}
+        rowKeys={sorted.map((r) => r.id)}
+        rows={sorted.map((r) => ({
+          episode: r.episode,
+          overall_score: (
+            <span style={{ color: scoreColor(channelScore(r)), fontWeight: 600 }}>
+              {fmt(channelScore(r))}
+            </span>
+          ),
+          n_flags: channelFlags(r),
+          ...Object.fromEntries(
+            MOTION_METRICS.map((m) => [
+              m,
+              activeChannel ? fmt(r.by_channel?.[activeChannel]?.[m]) : metricCell(r, m),
+            ])
+          ),
+        }))}
+        onRowClick={onOpen}
+      />
+    </Card>
   );
 }
 
