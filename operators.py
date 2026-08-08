@@ -6,7 +6,6 @@ import fiftyone.core.tags as fota
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
 
-from . import debug
 from .engine import activity, windowing
 from .engine.decode import has_numeric_signal
 from .engine.discovery import SCALAR_SIDECAR, TELEMETRY, discover_channels
@@ -125,9 +124,6 @@ class ComputeEpisodeQuality(foo.Operator):
             default_choice_to_delegated=True,
         )
 
-    def _debug(self, ctx, event, **fields):
-        debug.log(ctx, "compute_episode_quality", event, **fields)
-
     def resolve_delegation(self, ctx):
         return len(ctx.target_view()) > DELEGATION_THRESHOLD
 
@@ -146,12 +142,6 @@ class ComputeEpisodeQuality(foo.Operator):
         # machinery in this change (out of scope).
         filepath = view.first().filepath
         disc = list(_discover_scorable(filepath))
-        self._debug(
-            ctx,
-            "resolve_input.channels",
-            first_sample_filepath=filepath,
-            discovered=[(c.topic, c.kind, c.schema_name) for c in disc],
-        )
         if not disc:
             inputs.view(
                 "no_channels",
@@ -165,12 +155,6 @@ class ComputeEpisodeQuality(foo.Operator):
         telemetry = [c for c in disc if c.kind == TELEMETRY]
         motion_candidates = [c for c in telemetry if _channel_has_numeric_signal(filepath, c)]
         has_motion = bool(motion_candidates)
-        self._debug(
-            ctx,
-            "resolve_input.motion_candidates",
-            candidates=[c.topic for c in motion_candidates],
-            has_motion=has_motion,
-        )
 
         # One tab per metric family. Only the active tab's fields are
         # rendered, but values persist in ctx.params across tab switches
@@ -405,20 +389,6 @@ class ComputeEpisodeQuality(foo.Operator):
 
         view = ctx.target_view()
         n = len(view)
-        self._debug(
-            ctx,
-            "execute.start",
-            motion_topics=sorted(motion_topics),
-            motion_metrics=motion_metrics,
-            health_topics=sorted(health_topics),
-            health_metrics=health_metrics,
-            outliers_enabled=outliers_enabled,
-            outlier_channels=outlier_channels,
-            win_s=win_s,
-            overlap=overlap,
-            n_samples=n,
-            delegated=ctx.delegated,
-        )
 
         raw_by_id = {}
         for i, sample in enumerate(view):
@@ -433,24 +403,10 @@ class ComputeEpisodeQuality(foo.Operator):
                 idle_alpha=idle_alpha,
                 jerk_cutoff_hz=jerk_cutoff_hz,
             )
-            self._debug(
-                ctx,
-                "execute.scored_sample",
-                i=i,
-                sample_id=sample.id,
-                filepath=sample.filepath,
-                n_window_records=len(raw_by_id[sample.id].window_records),
-            )
             yield ctx.trigger("set_progress", {"progress": (i + 1) / n, "label": f"Scored {i + 1}/{n}"})
 
         results, norm_stats = finalize_batch(
             raw_by_id, outliers_enabled=outliers_enabled, outlier_channels=outlier_channels
-        )
-        self._debug(
-            ctx,
-            "execute.finalized",
-            episode_metrics=sorted(norm_stats["episode"]),
-            window_metrics=sorted(norm_stats["window"]),
         )
 
         temporal_tags = []
@@ -482,15 +438,6 @@ class ComputeEpisodeQuality(foo.Operator):
         )
 
         flagged = sum(1 for r in results.values() if r.n_flags > 0)
-        self._debug(
-            ctx,
-            "execute.done",
-            scored=n,
-            flagged=flagged,
-            run_key=RUN_KEY,
-            n_temporal_tags=len(temporal_tags),
-        )
-
         yield ctx.trigger("reload_dataset")
         yield {"scored": n, "flagged": flagged}
 

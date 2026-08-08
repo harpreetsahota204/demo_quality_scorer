@@ -164,9 +164,6 @@ function ChannelLegendBar(props: {
           </button>
         );
       })}
-      <span style={{ fontSize: 10.5, color: theme.textDim }}>
-        {active ? "showing one channel · click again for all" : "click a channel to isolate it"}
-      </span>
     </div>
   );
 }
@@ -180,11 +177,21 @@ export function MotionTab(props: {
   const [activeChannel, setActiveChannel] = React.useState<string | null>(null);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {data.channels.length > 1 && (
+        <div style={{ fontSize: 11, color: theme.textDim, marginBottom: -4 }}>
+          {activeChannel
+            ? `showing only ${activeChannel} · click its chip again to show all channels`
+            : "click a channel chip to isolate it"}
+        </div>
+      )}
       <ChannelLegendBar
         channels={data.channels}
         active={activeChannel}
         onPick={setActiveChannel}
       />
+      <div style={{ fontSize: 11, color: theme.textDim }}>
+        click any bar to filter the samples panel · dashed lines = warn thresholds
+      </div>
       <div
         style={{
           display: "grid",
@@ -197,15 +204,17 @@ export function MotionTab(props: {
           const thresholds = data.warn_thresholds[metric];
           const arrow = data.smoother_direction[metric] === "left" ? "← smoother" : "smoother →";
           const single = hist.channels.length === 1 ? thresholds?.[hist.channels[0]] : undefined;
-          const base =
+          // Shared cues (bar-click filtering, dashed warn lines) live once in
+          // the legend hint; the subtitle stays per-metric only
+          const subtitle =
             single !== undefined
               ? `${arrow} · warn ${data.smoother_direction[metric] === "left" ? "≥" : "≤"} ${single.toPrecision(3)}`
-              : `${arrow} · dashed line = per-channel warn threshold`;
+              : arrow;
           return (
             <Card
               key={metric}
               title={METRIC_LABELS[metric].title}
-              subtitle={hist.channels.length > 0 ? `${base} · click a bar to filter` : undefined}
+              subtitle={hist.channels.length > 0 ? subtitle : undefined}
               info={EXPLAINERS[metric]}
             >
               {hist.channels.length === 0 ? (
@@ -226,6 +235,7 @@ export function MotionTab(props: {
                   data={hist}
                   allChannels={data.channels}
                   filterChannel={activeChannel}
+                  xLabel={METRIC_LABELS[metric].short}
                   warnThresholds={thresholds}
                   onBarClick={(bar, channel) => {
                     const bars = hist.bars;

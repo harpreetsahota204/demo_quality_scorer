@@ -16,6 +16,16 @@ import { channelColor, theme, verdictColor } from "./theme";
 import { HistogramBar, MetricHistogramData, QualityRow } from "./types";
 
 const axisStyle = { fontSize: 10, fill: theme.textDim };
+const axisLabelStyle = { fill: theme.textDim, fontSize: 11 };
+
+// Compact tick text for large magnitudes ("7.5M", "12k") so y-axis labels
+// don't collide with wide tick numbers
+function fmtTick(v: number): string {
+  const abs = Math.abs(v);
+  if (abs >= 1e6) return `${(v / 1e6).toPrecision(3).replace(/\.?0+$/, "")}M`;
+  if (abs >= 1e3) return `${(v / 1e3).toPrecision(3).replace(/\.?0+$/, "")}k`;
+  return Number(v).toPrecision(3).replace(/\.?0+$/, "");
+}
 const tooltipStyle: React.CSSProperties = {
   background: theme.headerBg,
   border: `1px solid ${theme.cardBorder}`,
@@ -49,10 +59,12 @@ export function MetricHistogram(props: {
   allChannels: string[];
   /** When set, render only this channel's series */
   filterChannel?: string | null;
+  /** X-axis label (the metric's short name; values are in the metric's own units) */
+  xLabel: string;
   warnThresholds?: Record<string, number>;
   onBarClick?: (bar: HistogramBar, channel: string) => void;
 }) {
-  const { data, allChannels, filterChannel, warnThresholds, onBarClick } = props;
+  const { data, allChannels, filterChannel, xLabel, warnThresholds, onBarClick } = props;
   const { bars } = data;
   const channels =
     filterChannel && data.channels.includes(filterChannel) ? [filterChannel] : data.channels;
@@ -71,9 +83,10 @@ export function MetricHistogram(props: {
   }
 
   return (
-    <ResponsiveContainer width="100%" height={180}>
-      {/* top margin leaves headroom for the "warn" reference-line label */}
-      <BarChart data={bars} margin={{ top: 18, right: 8, bottom: 0, left: -18 }} barGap={0}>
+    <ResponsiveContainer width="100%" height={200}>
+      {/* top margin leaves headroom for the "warn" reference-line label;
+          bottom margin for the x-axis label */}
+      <BarChart data={bars} margin={{ top: 18, right: 8, bottom: 14, left: 4 }} barGap={0}>
         <CartesianGrid stroke={theme.cardBorder} strokeDasharray="3 3" vertical={false} />
         <XAxis
           dataKey="x"
@@ -82,8 +95,22 @@ export function MetricHistogram(props: {
           interval="preserveStartEnd"
           tickLine={false}
           axisLine={{ stroke: theme.cardBorder }}
+          label={{ value: xLabel, position: "bottom", offset: 0, ...axisLabelStyle }}
         />
-        <YAxis tick={axisStyle} allowDecimals={false} tickLine={false} axisLine={false} />
+        <YAxis
+          tick={axisStyle}
+          allowDecimals={false}
+          tickLine={false}
+          axisLine={false}
+          width={46}
+          label={{
+            value: "# of episodes",
+            angle: -90,
+            position: "insideLeft",
+            style: { textAnchor: "middle" },
+            ...axisLabelStyle,
+          }}
+        />
         <Tooltip
           content={<HistTooltip channels={channels} allChannels={allChannels} />}
           cursor={{ fill: "#ffffff10" }}
@@ -125,11 +152,30 @@ export function VerdictBar(props: {
     .map(([verdict, count]) => ({ verdict, count }));
 
   return (
-    <ResponsiveContainer width="100%" height={200}>
-      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }}>
+    <ResponsiveContainer width="100%" height={220}>
+      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 14, left: 4 }}>
         <CartesianGrid stroke={theme.cardBorder} strokeDasharray="3 3" vertical={false} />
-        <XAxis dataKey="verdict" tick={axisStyle} tickLine={false} axisLine={{ stroke: theme.cardBorder }} />
-        <YAxis tick={axisStyle} allowDecimals={false} tickLine={false} axisLine={false} />
+        <XAxis
+          dataKey="verdict"
+          tick={axisStyle}
+          tickLine={false}
+          axisLine={{ stroke: theme.cardBorder }}
+          label={{ value: "verdict", position: "bottom", offset: 0, ...axisLabelStyle }}
+        />
+        <YAxis
+          tick={axisStyle}
+          allowDecimals={false}
+          tickLine={false}
+          axisLine={false}
+          width={46}
+          label={{
+            value: "# of episodes",
+            angle: -90,
+            position: "insideLeft",
+            style: { textAnchor: "middle" },
+            ...axisLabelStyle,
+          }}
+        />
         <Tooltip
           contentStyle={tooltipStyle}
           cursor={{ fill: "#ffffff10" }}
@@ -178,14 +224,14 @@ export function OutlierScatter(props: { rows: QualityRow[]; onOpen: (id: string)
           name="iforest_score"
           domain={["auto", "auto"]}
           tick={axisStyle}
+          tickFormatter={fmtTick}
           tickLine={false}
           axisLine={{ stroke: theme.cardBorder }}
           label={{
             value: "iforest_score (higher = more anomalous)",
             position: "bottom",
             offset: 0,
-            fill: theme.textDim,
-            fontSize: 11,
+            ...axisLabelStyle,
           }}
         />
         <YAxis
@@ -194,14 +240,14 @@ export function OutlierScatter(props: { rows: QualityRow[]; onOpen: (id: string)
           name="knn_dist"
           domain={["auto", "auto"]}
           tick={axisStyle}
+          tickFormatter={fmtTick}
           tickLine={false}
           axisLine={false}
           label={{
             value: "knn_dist (higher = more isolated)",
             angle: -90,
             position: "insideLeft",
-            fill: theme.textDim,
-            fontSize: 11,
+            ...axisLabelStyle,
           }}
         />
         <Tooltip content={<ScatterTooltip />} cursor={{ strokeDasharray: "3 3" }} />

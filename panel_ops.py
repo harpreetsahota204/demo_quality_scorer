@@ -7,7 +7,6 @@ via ``useOperatorExecutor``, not from the operator browser.
 
 import fiftyone.operators as foo
 
-from . import debug
 from .panel_data import build_panel_data, worst_interval_message
 
 
@@ -17,15 +16,7 @@ class GetQualityPanelData(foo.Operator):
         return foo.OperatorConfig(name="get_quality_panel_data", unlisted=True)
 
     def execute(self, ctx):
-        data = build_panel_data(ctx.dataset, ctx.view)
-        debug.log(
-            ctx,
-            "get_quality_panel_data",
-            "execute",
-            scored=data.get("scored"),
-            n_rows=len(data.get("rows", [])),
-        )
-        return data
+        return build_panel_data(ctx.dataset, ctx.view)
 
 
 class OpenQualityEpisode(foo.Operator):
