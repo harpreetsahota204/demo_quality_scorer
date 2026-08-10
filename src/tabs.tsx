@@ -168,6 +168,49 @@ function ChannelLegendBar(props: {
   );
 }
 
+// Expand/collapse toggle for one histogram card. Expanding swaps the 2x2
+// grid for a single full-width card of about the same total height -- not
+// a modal, just a re-layout within the tab's existing real estate.
+function ExpandToggle(props: { expanded: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={props.onClick}
+      title={props.expanded ? "Back to grid" : "Expand this chart"}
+      style={{
+        background: "none",
+        border: `1px solid ${theme.cardBorder}`,
+        borderRadius: 4,
+        color: theme.textDim,
+        width: 22,
+        height: 22,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: "pointer",
+        padding: 0,
+      }}
+      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.color = theme.text)}
+      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.color = theme.textDim)}
+    >
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+        {props.expanded ? (
+          // collapse: arrows pointing inward
+          <>
+            <polyline points="4 14 10 14 10 20" />
+            <polyline points="20 10 14 10 14 4" />
+          </>
+        ) : (
+          // expand: arrows pointing outward
+          <>
+            <polyline points="15 3 21 3 21 9" />
+            <polyline points="9 21 3 21 3 15" />
+          </>
+        )}
+      </svg>
+    </button>
+  );
+}
+
 export function MotionTab(props: {
   data: PanelData;
   onOpen: (id: string) => void;
@@ -175,6 +218,8 @@ export function MotionTab(props: {
 }) {
   const { data, onShow } = props;
   const [activeChannel, setActiveChannel] = React.useState<string | null>(null);
+  const [expanded, setExpanded] = React.useState<MotionMetric | null>(null);
+  const shownMetrics = expanded ? [expanded] : [...MOTION_METRICS];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {data.channels.length > 1 && (
@@ -195,11 +240,11 @@ export function MotionTab(props: {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+          gridTemplateColumns: expanded ? "1fr" : "repeat(auto-fit, minmax(280px, 1fr))",
           gap: 12,
         }}
       >
-        {MOTION_METRICS.map((metric) => {
+        {shownMetrics.map((metric) => {
           const hist = data.histograms[metric] ?? { channels: [], bars: [] };
           const thresholds = data.warn_thresholds[metric];
           const arrow = data.smoother_direction[metric] === "left" ? "← smoother" : "smoother →";
@@ -216,6 +261,12 @@ export function MotionTab(props: {
               title={METRIC_LABELS[metric].title}
               subtitle={hist.channels.length > 0 ? subtitle : undefined}
               info={EXPLAINERS[metric]}
+              action={
+                <ExpandToggle
+                  expanded={expanded === metric}
+                  onClick={() => setExpanded(expanded === metric ? null : metric)}
+                />
+              }
             >
               {hist.channels.length === 0 ? (
                 <div
@@ -236,6 +287,7 @@ export function MotionTab(props: {
                   allChannels={data.channels}
                   filterChannel={activeChannel}
                   xLabel={METRIC_LABELS[metric].short}
+                  height={expanded ? 480 : 200}
                   warnThresholds={thresholds}
                   onBarClick={(bar, channel) => {
                     const bars = hist.bars;

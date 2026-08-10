@@ -81,6 +81,8 @@ export function Card(props: {
   title?: string;
   subtitle?: string;
   info?: string;
+  /** Right-aligned element in the header row (e.g. an expand toggle) */
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -105,6 +107,7 @@ export function Card(props: {
         >
           {props.title}
           {props.info && <InfoTip text={props.info} />}
+          {props.action && <span style={{ marginLeft: "auto" }}>{props.action}</span>}
         </div>
       )}
       {props.subtitle && (

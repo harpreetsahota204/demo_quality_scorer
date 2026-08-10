@@ -61,10 +61,11 @@ export function MetricHistogram(props: {
   filterChannel?: string | null;
   /** X-axis label (the metric's short name; values are in the metric's own units) */
   xLabel: string;
+  height?: number;
   warnThresholds?: Record<string, number>;
   onBarClick?: (bar: HistogramBar, channel: string) => void;
 }) {
-  const { data, allChannels, filterChannel, xLabel, warnThresholds, onBarClick } = props;
+  const { data, allChannels, filterChannel, xLabel, height = 200, warnThresholds, onBarClick } = props;
   const { bars } = data;
   const channels =
     filterChannel && data.channels.includes(filterChannel) ? [filterChannel] : data.channels;
@@ -83,7 +84,7 @@ export function MetricHistogram(props: {
   }
 
   return (
-    <ResponsiveContainer width="100%" height={200}>
+    <ResponsiveContainer width="100%" height={height}>
       {/* top margin leaves headroom for the "warn" reference-line label;
           bottom margin for the x-axis label */}
       <BarChart data={bars} margin={{ top: 18, right: 8, bottom: 14, left: 4 }} barGap={0}>
