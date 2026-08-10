@@ -211,7 +211,17 @@ class ComputeEpisodeQuality(foo.Operator):
         # channels across episodes. Fine for a view recorded by a single
         # producer/schema, which is the common case, but a heterogeneous view
         # will only offer the channels its first episode happens to carry.
-        filepath = _local_path(view.first())
+        sample0 = view.first()
+        # TEMP DEBUG (remove once the Enterprise cloud-path issue is diagnosed):
+        # ctx.log reaches the browser console; print() would not.
+        ctx.log(
+            "[demo-quality-scorer DEBUG] build=local_path-fix-v2 "
+            f"sample.filepath={sample0.filepath!r} "
+            f"has_local_path_attr={hasattr(sample0, 'local_path')} "
+            f"local_path_value={getattr(sample0, 'local_path', '<no attr>')!r}"
+        )
+        filepath = _local_path(sample0)
+        ctx.log(f"[demo-quality-scorer DEBUG] resolved filepath={filepath!r}")
         disc = list(_discover_scorable(filepath))
         if not disc:
             inputs.view(
