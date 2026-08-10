@@ -148,9 +148,10 @@ def _decoder_factories():
     """Whichever MCAP message decoders are installed, in encoding-priority order.
 
     All three are optional dependencies: a user scoring protobuf episodes
-    shouldn't be forced to install the ROS stacks. Missing ones are skipped,
-    which surfaces later as "this channel has no numeric signal" rather than
-    an import error at plugin load.
+    shouldn't be forced to install the ROS stacks. Missing ones are skipped
+    here; the operator form reports them explicitly via
+    :func:`missing_decoder_package`, and decode of an affected channel
+    produces empty records rather than an import error.
     """
     factories = []
     for module_name, class_name in (
@@ -164,6 +165,49 @@ def _decoder_factories():
             continue
         factories.append(getattr(module, class_name)())
     return factories
+
+
+# Maps each structured message encoding to the decoder module that handles it
+# and the pip package that provides that module. ROS 2 recordings write their
+# wire format's name (`cdr`) rather than a `ros2` label, so both map to the
+# ROS 2 stack. JSON is absent deliberately: it decodes with the stdlib.
+_ENCODING_DECODER_PACKAGES = {
+    "protobuf": ("mcap_protobuf.decoder", "mcap-protobuf-support"),
+    "ros1": ("mcap_ros1.decoder", "mcap-ros1-support"),
+    "ros2": ("mcap_ros2.decoder", "mcap-ros2-support"),
+    "cdr": ("mcap_ros2.decoder", "mcap-ros2-support"),
+}
+
+
+def missing_decoder_package(message_encoding):
+    """The pip package needed to decode ``message_encoding``, or ``None`` if decodable now.
+
+    Lets callers distinguish "this channel decoded to no numeric fields" (a
+    property of the data) from "nothing on this machine can decode this
+    channel at all" (a property of the environment). The two must not be
+    conflated: the first justifies excluding a channel, the second is the
+    user's call plus a warning naming the package to install -- learned on a
+    FiftyOne Enterprise pod without ``mcap-protobuf-support``, where every
+    protobuf channel silently read as "no numeric signal" and the whole
+    Motion family shut itself off.
+
+    Args:
+        message_encoding: a channel's ``message_encoding`` string
+
+    Returns:
+        the pip package name to install, or ``None`` if the encoding is
+        decodable right now (decoder installed, or JSON which needs none)
+    """
+    entry = _ENCODING_DECODER_PACKAGES.get(message_encoding)
+    if entry is None:
+        return None
+
+    module_name, package = entry
+    try:
+        __import__(module_name)
+    except ImportError:
+        return package
+    return None
 
 
 def _walk_fields(message):

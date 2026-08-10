@@ -60,9 +60,14 @@ reflects all three families.
 **Motion smoothness.** Enabled when the first sample has at least one
 telemetry channel carrying a numeric signal a speed profile can be derived
 from. If none does (a camera-only episode, for example), the family switches
-itself off and says why. Pick which channels carry motion; the dropdown drops
-each topic you add so you can't add one twice, which makes selecting both arms
-of a bimanual rig straightforward. Each channel is scored on its own and the
+itself off and says why. A channel is only excluded on that basis when its
+messages actually decoded to no numeric fields; if the server has no decoder
+installed for a channel's encoding at all (say, `mcap-protobuf-support`
+missing on a protobuf recording), the channel stays selectable and the form
+shows a warning naming the package to install instead of deciding for you.
+Pick which channels carry motion; the dropdown drops each topic you add so
+you can't add one twice, which makes selecting both arms of a bimanual rig
+straightforward. Each channel is scored on its own and the
 worst channel per metric drives the episode's score. The four metric
 checkboxes (SPARC, LDLJ, Jerk RMS, PSD ratio) are all on by default and carry
 short validity notes: SPARC is the most validated of the four and the least

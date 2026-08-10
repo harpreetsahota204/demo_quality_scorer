@@ -7,7 +7,7 @@ import fiftyone.operators as foo
 import fiftyone.operators.types as types
 
 from .engine import activity, motion, windowing
-from .engine.decode import has_numeric_signal
+from .engine.decode import has_numeric_signal, missing_decoder_package
 from .engine.discovery import SCALAR_SIDECAR, TELEMETRY, discover_channels
 from .engine.score import (
     CONFIG_VERSION,
@@ -211,17 +211,7 @@ class ComputeEpisodeQuality(foo.Operator):
         # channels across episodes. Fine for a view recorded by a single
         # producer/schema, which is the common case, but a heterogeneous view
         # will only offer the channels its first episode happens to carry.
-        sample0 = view.first()
-        # TEMP DEBUG (remove once the Enterprise cloud-path issue is diagnosed):
-        # ctx.log reaches the browser console; print() would not.
-        ctx.log(
-            "[demo-quality-scorer DEBUG] build=local_path-fix-v2 "
-            f"sample.filepath={sample0.filepath!r} "
-            f"has_local_path_attr={hasattr(sample0, 'local_path')} "
-            f"local_path_value={getattr(sample0, 'local_path', '<no attr>')!r}"
-        )
-        filepath = _local_path(sample0)
-        ctx.log(f"[demo-quality-scorer DEBUG] resolved filepath={filepath!r}")
+        filepath = _local_path(view.first())
         disc = list(_discover_scorable(filepath))
         if not disc:
             inputs.view(
@@ -234,8 +224,50 @@ class ComputeEpisodeQuality(foo.Operator):
             return types.Property(inputs)
 
         telemetry = [c for c in disc if c.kind == TELEMETRY]
-        motion_candidates = [c for c in telemetry if _channel_has_numeric_signal(filepath, c)]
+
+        # A channel is excluded from Motion only when it *decoded* to no
+        # numeric fields (e.g. a string-only label channel). When no decoder
+        # for its encoding is installed at all, nothing is known about the
+        # channel, so it stays selectable -- the environment's gaps are
+        # surfaced as a warning naming the missing package, never silently
+        # imposed as "your data has no motion". A pod without
+        # mcap-protobuf-support once disabled the whole family this way.
+        # Failed imports are not cached by Python, so probe once per distinct
+        # encoding rather than once per channel (dynamic=True re-resolves the
+        # form on every interaction).
+        package_by_encoding = {
+            encoding: missing_decoder_package(encoding)
+            for encoding in {c.message_encoding for c in telemetry}
+        }
+
+        missing_packages = {}  # pip package -> affected channel count
+        motion_candidates = []
+        for c in telemetry:
+            package = package_by_encoding[c.message_encoding]
+            if package is not None:
+                missing_packages[package] = missing_packages.get(package, 0) + 1
+                motion_candidates.append(c)
+            elif _channel_has_numeric_signal(filepath, c):
+                motion_candidates.append(c)
+
         has_motion = bool(motion_candidates)
+
+        if missing_packages:
+            details = "; ".join(
+                f"{count} channel(s) need {package}"
+                for package, count in sorted(missing_packages.items())
+            )
+            inputs.view(
+                "missing_decoders",
+                types.Warning(
+                    label=(
+                        f"Missing MCAP decoders on this server: {details}. "
+                        "Affected channels stay selectable, but every family "
+                        "decodes them to nothing until the package(s) are "
+                        "installed in the server's Python environment."
+                    )
+                ),
+            )
 
         # One tab per metric family. Only the active tab's fields are
         # rendered, but values persist in ctx.params across tab switches
