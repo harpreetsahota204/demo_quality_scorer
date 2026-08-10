@@ -75,6 +75,14 @@ def discover_channels(filepath):
 
 
 def _classify(message_encoding, schema):
+    """Assigns a channel the kind that decides what can be computed on it.
+
+    Order matters: cameras are protobuf/ROS-encoded too, so they must be
+    ruled out by schema before encoding is consulted, or every image channel
+    would be handed to the scalar decoder. `OTHER` is the deliberate
+    catch-all for encodings this plugin can't decode (cdr, cbor, custom) --
+    they stay visible in discovery, just not scorable.
+    """
     schema_name = schema.name if schema else None
     if schema_name in _VIDEO_SCHEMAS:
         return CAMERA

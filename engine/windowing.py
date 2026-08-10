@@ -3,7 +3,9 @@
 2s windows, 50% overlap, on the channel's own nanosecond timebase (no
 cross-channel resampling here -- each channel is windowed against its own
 timestamps, since telemetry channels in a single episode are commonly
-sampled on independent clocks).
+sampled on independent clocks). Every window spans the full window length:
+several motion metrics are duration-dependent, so a short trailing window
+isn't comparable to the full ones it would be normalized against.
 """
 
 import re
@@ -78,9 +80,10 @@ def windows_for_group(records, group, field_names, win_s=WINDOW_S, overlap=OVERL
         overlap (0.5): fractional overlap between consecutive windows
 
     Returns:
-        a list of :class:`Window`
+        a list of :class:`Window`, all spanning the full ``win_s`` except
+        when the channel is shorter than one window
     """
-    if not records:
+    if len(records) < 2:
         return []
 
     t0 = records[0][0]
@@ -89,12 +92,23 @@ def windows_for_group(records, group, field_names, win_s=WINDOW_S, overlap=OVERL
 
     step_s = win_s * (1.0 - overlap)
     duration_s = times_s[-1]
-    if duration_s <= 0:
+    if duration_s <= 0 or step_s <= 0:
         return []
 
+    if duration_s < win_s:
+        # Too short for even one complete window. One window over everything
+        # beats scoring nothing, and since every episode of such a channel
+        # gets the same treatment, the batch stays internally comparable.
+        return [Window(0.0, duration_s, group, vectors)]
+
+    # Only *complete* windows: a partial trailing window spans less time, and
+    # ldlj's dimensionless jerk scales as roughly duration**4, so a
+    # half-length window reads ~2.8 units smoother on identical motion. It
+    # would never be flagged, and it would skew the channel's window-level
+    # normalization stats for every other window too.
     windows = []
     start_s = 0.0
-    while start_s < duration_s:
+    while start_s + win_s <= duration_s:
         end_s = start_s + win_s
         mask = (times_s >= start_s) & (times_s < end_s)
         if mask.sum() >= 2:

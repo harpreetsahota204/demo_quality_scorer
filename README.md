@@ -1,393 +1,400 @@
-# Demo Quality Scorer — User Guide
+# Demo Quality Scorer
 
-A FiftyOne plugin that ranks multimodal MCAP episodes worst-first on
-motion-smoothness, sensor-health, and outlier metrics, then deep-links
-straight into the multimodal viewer so a human can confirm every flag by eye.
+A FiftyOne plugin that ranks multimodal MCAP episodes worst-first on motion
+smoothness, sensor health, and outlier metrics, then deep-links into the
+multimodal viewer so you can confirm every flag by eye.
 
-**Core rule: this is triage, not autofilter.** Nothing here should ever be
-used as an automatic accept/reject gate. Structural errors (the wrong action
-at a key moment) are invisible to every metric in this plugin — only a human
-watching the episode can catch those. Scores exist to tell you *where to
-look first*, not to make the decision for you.
+**Use it to decide where to look first. Do not use it as an automatic
+accept/reject gate.** Structural errors, such as the wrong action at a key
+moment, are invisible to every metric here. A demo can be perfectly smooth and
+still be a failed demonstration. Only a human watching the episode catches
+that, so the scores exist to order your queue, not to make the call.
 
 ## Contents
 
-- [Setup](#setup)
-- [Running the scorer](#running-the-scorer)
+- [Install](#install)
+- [Score a dataset](#score-a-dataset)
 - [The Motion tab](#the-motion-tab)
 - [The Health tab](#the-health-tab)
 - [The Outliers tab](#the-outliers-tab)
-- [Bulk triage](#bulk-triage)
-- [Which metrics matter for which dataset type](#which-metrics-matter-for-which-dataset-type)
-- [Reading `quality_intervals` and the timeline](#reading-quality_intervals-and-the-timeline)
-- [As-built deviations from the original PRD](#as-built-deviations-from-the-original-prd)
-- [Known limitations](#known-limitations)
+- [How a score is computed](#how-a-score-is-computed)
+- [Flagged intervals and the timeline](#flagged-intervals-and-the-timeline)
+- [Tagging for review](#tagging-for-review)
+- [What signal to expect from your data](#what-signal-to-expect-from-your-data)
+- [Limits](#limits)
 
-## Setup
+## Install
 
 ```bash
-pip install "fiftyone[multimodal]>=1.19.0" mcap mcap-protobuf-support mcap-ros1-support mcap-ros2-support numpy scipy scikit-learn
+pip install "fiftyone[multimodal]>=1.19.0" mcap mcap-protobuf-support \
+    mcap-ros1-support mcap-ros2-support numpy scipy scikit-learn
 ```
 
-`VFF_MULTIMODAL=1` must be set as an environment variable **before**
-`fiftyone` is imported, in every process that touches a multimodal dataset
-(scoring script, `fiftyone app launch`, notebook, etc.) — this gates the
-App's native MCAP viewer, independent of the plugin.
+Set `VFF_MULTIMODAL=1` as an environment variable **before** `fiftyone` is
+imported, in every process that touches a multimodal dataset (scoring script,
+`fiftyone app launch`, notebook). This gates the App's native MCAP viewer and
+is independent of the plugin.
 
-The Episode Quality panel is a React component and ships prebuilt
-(`dist/index.umd.js`) — nothing extra to install to *use* it. To modify the
-frontend (`src/`), rebuild with `npm install && npm run build` (or
-`npm run dev` for watch mode) and hard-refresh the browser.
+The Episode Quality panel is a React component and ships prebuilt in
+`dist/index.umd.js`, so there is nothing extra to install to use it. To change
+the frontend in `src/`, run `npm install && npm run build` (or `npm run dev`
+for watch mode) and hard-refresh the browser.
 
-## Running the scorer
+## Score a dataset
 
-1. Open (or create) a multimodal dataset (`media_type="multimodal"`,
+1. Open a multimodal dataset (`media_type="multimodal"`, with
    `.mcap`/`.bag`/`.rrd` samples).
-2. Run **Compute episode quality** from the Operator Browser, or click
-   "Compute episode quality" from inside the (empty) Episode Quality panel.
-3. The form is organized by **metric family**, one tab per family (Motion /
-   Sensor health / Outliers). Each tab holds that family's enable checkbox
-   and settings; selections persist when you switch tabs, and the
-   validation line below the tabs always reflects all three families.
-   Inside each family every individual metric is a checkbox row with a
-   short description:
-   - **Motion smoothness** — auto-checked when the first sample has at
-     least one telemetry channel carrying a numeric (speed-derivable)
-     signal, with a multi-select of which channels carry motion. The
-     picker starts empty — add channels from the dropdown (each picked
-     topic leaves the dropdown, so you can't add one twice; e.g. add both
-     arms of a bimanual rig). Each selected channel is scored
-     independently and the worst channel per metric drives the episode's
-     score (see [the worst-of rationale](#why-worst-of-across-channels)).
-     The four metric checkboxes (SPARC / LDLJ / Jerk RMS / PSD ratio,
-     all on by default) carry validity notes from the literature — SPARC
-     is the most noise-robust and validated; LDLJ and jerk are
-     noise-sensitive, so deselect them on noisy telemetry. Deselected
-     metrics are simply absent from `quality.*` and the overall score
-     renormalizes over what's left. Windowing (window length / overlap,
-     defaults 2s / 50%), `idle_alpha` (default `0.05`), and
-     `jerk_cutoff_hz` (default `10.0`, shown only while Jerk RMS is
-     selected) live inside this section because windows only affect
-     motion — health uses full-episode timestamps and outliers use
-     episode scalars. Auto-unchecked with a visible reason if no numeric
-     channel exists (e.g. a camera-only episode).
-   - **Sensor health** — on by default; same empty-start multi-select of
-     the discovered channels, plus five metric checkboxes (dropout, rate
-     stability, clock drift, clipping, cross-channel desync).
-   - **Outliers** — on by default, with a channel picker of its own:
-     since the models consume per-channel motion features, you can
-     restrict which channels' features feed them (leave empty for all
-     selected motion channels; health features are episode-wide and
-     always contribute). With Motion disabled the picker disappears and
-     a notice explains the models fall back to health features only.
+2. Run **Compute episode quality** from the Operator Browser, or click the
+   **Compute episode quality** button in the empty Episode Quality panel.
+3. Fill in the form (below), then Run. Views over 50 samples are pushed to
+   delegated background execution automatically; smaller views run immediately
+   with a progress bar.
+4. Open the panel: **New panel → Episode Quality**. It refreshes whenever the
+   current view changes, so filtering the grid re-ranks the panel to match.
 
-   A validation line above **Run** explains what will and won't be
-   computed and why (e.g. "Motion: skipped, no telemetry channel carries a
-   numeric signal") — this is advisory, never a hard block; a health-only
-   run (Motion and Outliers both unchecked) is entirely legitimate.
-4. For views over 50 samples the operator forces delegated (background)
-   execution automatically; smaller views run immediately with a progress
-   bar.
-5. Open the **Episode Quality** panel (New panel → Episode Quality). It
-   refreshes automatically whenever the current view changes, so filtering
-   the grid re-ranks the panel to match.
+The form has one tab per metric family. Each tab holds that family's on/off
+switch, its per-metric checkboxes, and a channel picker. Your selections
+persist when you switch tabs, and the advisory line above **Run** always
+reflects all three families.
 
-Re-running the operator (e.g. after adding episodes, or with a different
-family/channel selection) re-fits normalization from scratch across the
-current view and overwrites every sample's `quality*` fields — this is
-expected; scores are always relative to whatever population you last
-scored together.
+**Motion smoothness.** Enabled when the first sample has at least one
+telemetry channel carrying a numeric signal a speed profile can be derived
+from. If none does (a camera-only episode, for example), the family switches
+itself off and says why. Pick which channels carry motion; the dropdown drops
+each topic you add so you can't add one twice, which makes selecting both arms
+of a bimanual rig straightforward. Each channel is scored on its own and the
+worst channel per metric drives the episode's score. The four metric
+checkboxes (SPARC, LDLJ, Jerk RMS, PSD ratio) are all on by default and carry
+short validity notes: SPARC is the most validated of the four and the least
+affected by sensor noise, while LDLJ and jerk RMS are noise-sensitive, so
+consider unchecking those two on noisy telemetry. Anything you uncheck is absent from `quality.*`
+and the overall score renormalizes over what is left.
 
-Formula changes bump `quality.config_version`. If a view mixes samples
-scored under different `config_version`s (e.g. you scored half the dataset
-before a metric-formula update and half after), the panel shows a warning
-banner instead of silently blending the two into one ranking — re-run the
-scorer across the whole view to make it comparable again.
+Windowing settings live in this tab because windows only affect motion (health
+reads full-episode timestamps, outliers read episode scalars):
+
+| Setting | Default | What it does |
+|---|---|---|
+| Window length | `2.0` s | Shorter windows localize flags more precisely and get noisier. Minimum 0.5 s |
+| Window overlap | `0.5` | Fraction of overlap between consecutive windows, up to 0.9 |
+| Idle threshold | `0.05` | Multiplier on each episode's own moving speed, below which a sample counts as idle |
+| Jerk pre-filter cutoff | `10.0` Hz | Low-pass cutoff applied before differentiating for jerk RMS. Shown only while Jerk RMS is checked |
+
+**Sensor health.** On by default, with its own channel picker and five metric
+checkboxes (dropout, rate stability, clock drift, clipping, cross-channel
+desync). Everything in this family comes from message timestamps and raw
+values, so it needs no motion channel and works identically on any channel
+kind the plugin can decode.
+
+**Outliers.** On by default. The models consume per-channel motion features,
+so you can restrict which channels' features reach them; leave the picker
+empty to use every selected motion channel. Health features are episode-wide
+and always contribute. With Motion off, the picker is replaced by a notice
+that the models will run on health features alone.
+
+The advisory line above **Run** spells out what will and won't be computed,
+for example `Motion: skipped, no telemetry channel carries a numeric signal`.
+It never blocks the run. A health-only run, with Motion and Outliers both off,
+is a legitimate way to use this plugin.
+
+Re-running rewrites every `quality*` field on the samples in the current view
+and re-fits normalization from scratch across that view. Expect scores to move
+when you re-run over a different population, because every score is relative
+to the batch it was fit against.
 
 ## The Motion tab
 
-Four histograms — Smoothness (SPARC), Normalized jerk (LDLJ), Jerk intensity
-(RMS), and Low/high frequency ratio (PSD) — and a worst-first ranking table
-sorted by `quality.overall_score`. When several motion channels were scored,
-each histogram draws one colored series per channel (legend on top), and
-dashed lines mark each channel's own warn threshold (z >= 2 against the
-batch) in that channel's units. Every chart carries an "i" icon with a
-plain-language explainer of what the metric means and how to read the plot.
+Four histograms and a worst-first ranking table:
 
-The charts are interactive:
+| Chart | Metric |
+|---|---|
+| Smoothness (SPARC) | `quality.sparc` |
+| Normalized jerk (LDLJ) | `quality.ldlj` |
+| Jerk intensity (RMS) | `quality.jerk_rms` |
+| Low/high frequency ratio (PSD) | `quality.psd_lf_hf` |
+
+Each chart carries an "i" icon with a plain-language explainer, an expand
+button that swaps the 2x2 grid for one full-width plot, a dashed line at the
+warn threshold in that channel's own units, and an arrow showing which
+direction is smoother. A metric you didn't compute shows "Not computed in the
+last run" instead of an empty plot.
+
+Ways to drive it:
 
 - **Click a histogram bar** to filter the samples panel to the episodes in
-  that bin on that channel (a toast confirms what's showing; clear the view
-  bar to reset). Since the panel re-ranks to the current view, the
-  histograms then re-bin to the filtered subset.
-- **Click any row** in the ranking table to jump straight into that
-  episode's multimodal viewer, with a toast surfacing the timecode of its
-  worst flagged interval. Metric cells show the worst channel's value —
-  hover one for the per-channel breakdown.
+  that bin on that channel. A toast confirms what's showing; clear the view
+  bar to reset. The panel re-ranks to the current view, so the histograms then
+  re-bin to the filtered subset.
+- **Click a channel chip** in the legend (shown when more than one channel was
+  scored) to isolate that channel across all four plots. The ranking table
+  follows: its values switch to that channel's own, the Overall column becomes
+  **Motion score**, and rows re-rank by that channel's motion-only score.
+  Click the chip again to show everything.
+- **Click a table row** to open that episode in the multimodal viewer, with a
+  toast naming the timecode of its worst flagged interval. Metric cells show
+  the worst channel's value; hover one for the per-channel breakdown.
 
-### Why worst-of across channels
+With several channels scored, each top-level field below holds the worst
+channel's value.
 
-Each selected motion channel is scored independently and normalized against
-its own per-(metric, channel) dataset-wide stats — different channels can
-carry different units (rad/s vs m/s), so pooling them into one stats fit
-would be meaningless. The per-channel values are then combined
-**worst-of**: the channel with the highest (worst) z-score per metric
-drives the episode's top-level value, `overall_score`, and `n_flags`.
-
-This deliberately diverges from the published choice in the closest
-comparable work: RINSE ([arXiv:2604.23000](https://arxiv.org/abs/2604.23000))
-*averages* smoothness over both arms when filtering bimanual training data,
-and that averaging is validated against downstream policy success. Filtering
-and triage optimize different objectives, though. Averaging asks "how good
-is this episode overall as training signal"; triage asks "is there anything
-here a human should see." A jerky right arm averaged with a smooth left arm
-looks fine — which is exactly the flag a reviewer needs surfaced. Movement
-science reports smoothness per limb and defines no standard cross-limb
-aggregate at all, so per-channel scoring with an explicit, documented
-rollup is the honest middle ground. The per-channel values are kept on
-every sample (`quality.motion_by_channel`) and in the panel's hover
-breakdowns, so nothing is hidden by the rollup.
-
-The panel opens onto the first tab the last run actually scored — a
-health-only run opens onto Health, and a tab whose family wasn't scored
-shows an explanation instead of empty plots.
-
-With multiple motion channels scored, each top-level metric field below
-(`quality.sparc`, etc.) holds the **worst channel's** value; per-channel
-values live in `quality.motion_by_channel`.
-
-| Field | What it measures | Direction |
+| Field | What it measures | How to read it |
 |---|---|---|
-| `sparc` | Spectral arc length of the motion's speed profile | **Less negative (closer to 0) = smoother.** Very negative = erratic, jerky motion |
-| `ldlj` | Log dimensionless jerk of the speed profile | **Less negative = smoother.** Very negative = rough motion |
-| `jerk_rms` | RMS jerk of the speed profile, after a zero-phase low-pass filter (`jerk_cutoff_hz`, default 10 Hz) applied before differentiating | **Lower = smoother.** High values = abrupt corrections, kickbacks, or actuator issues. Down-weighted (0.3x) in `overall_score` since it tends to co-vary with `sparc`/`ldlj`/`psd_lf_hf` — all four summarize the same speed profile's roughness |
-| `psd_lf_hf` | Ratio of low-frequency to high-frequency power (Welch PSD) in the speed profile — **our own metric**, not a reproduction of Sojib & Begum's PSD data-quality metric (arXiv:2605.01544), whose "PSD" is raw summed DFT power on 3D end-effector *position*, ranked ascending. The name overlap is coincidental and the numbers aren't comparable to that paper's | **Higher = smoother** (energy concentrated at low frequencies). Low values mean a lot of high-frequency noise/vibration |
-| `motion_by_channel` | List of per-channel motion metric docs (`channel` + every metric above), one entry per scored channel | Raw values in each channel's own units; this is what the multi-series histograms and hover breakdowns read |
-| `motion_worst_channel` | Which channel's z-score drove each top-level motion value (e.g. `{sparc: "/right-arm-state"}`) | Provenance for the worst-of rollup — tells you which side to watch first |
-| `idle_frac` | Fraction of the motion channel's windows below an idle-speed threshold, computed as `idle_alpha * median(speed)` **for that episode's own channel** (not a fixed absolute speed) — this is what makes the same threshold meaningful whether a channel reports rad/s, m/s, or a normalized unit | Not shown in this tab (visible via the sidebar/`dataset.values()`) and not scored into `overall_score`. High = episode is mostly stationary |
-| `saturation_frac` | Fraction of samples pinned at their own observed min/max (heuristic — see [Known limitations](#known-limitations)) | Not shown in this tab; not scored into `overall_score` |
-| `overall_score` | Weighted mean of every *enabled* metric's robust z-score (motion + health + outlier), oriented so higher is always worse. Disabling a family removes its metrics and renormalizes the remaining weights, rather than diluting the average with zeros | The sort key. `0` = typical for this batch; `+2` and up starts to be genuinely unusual; large negative scores are your *cleanest* episodes |
-| `n_flags` | Count of metrics whose z-score cleared the warn threshold (z >= 2) | Higher = more independent signals think this episode is off |
+| `sparc` | Spectral arc length of the speed profile | Closer to 0 is smoother. Very negative means erratic, fragmented motion |
+| `ldlj` | Log dimensionless jerk of the speed profile | Closer to 0 is smoother. Very negative means rough motion |
+| `jerk_rms` | RMS jerk of the speed profile, low-pass filtered before differentiating | Lower is smoother. High values mean abrupt corrections, kickback, or actuator trouble. Weighted 0.3x in `overall_score` because it covaries with the other three |
+| `psd_lf_hf` | Log ratio of low- to high-frequency power (Welch PSD) of the speed profile | Higher is smoother, meaning energy sits in slow deliberate movement. Low values mean high-frequency noise, tremor, or vibration |
+| `sparc_worst`, `ldlj_worst`, `jerk_rms_worst`, `psd_lf_hf_worst` | The episode's single worst window for that metric, where the metric itself is the median over windows | Sidebar or `dataset.values()` only, not in the table. The median says what the episode was typically like; the worst window catches one bad stretch the median washes out |
+| `idle_frac` | Fraction of windows below the idle-speed threshold | Not scored into `overall_score`. High means the episode was mostly stationary, which can be a legitimate pause as easily as a stall |
+| `saturation_frac` | Fraction of samples pinned at their own observed min/max | Not scored into `overall_score`. A heuristic; see [Limits](#limits) |
+| `motion_by_channel` | One embedded doc per scored channel, holding `channel` plus every metric above | Raw values in each channel's own units. This is what the multi-series histograms and hover breakdowns read |
+| `motion_worst_channel` | Which channel drove each top-level value, e.g. `{sparc: "/right-arm-state"}` | Tells you which side to watch first |
+| `overall_score` | Weighted mean of every enabled metric's z-score, oriented so higher is always worse | The sort key. `0` is typical for this batch, `+2` and up is genuinely unusual, and large negative scores are your cleanest episodes |
+| `n_flags` | How many metrics cleared the warn threshold | Higher means more independent signals agree something is off |
 
-SPARC and LDLJ come from movement-smoothness literature on human point-to-point
-reaching, where healthy reaches land around SPARC ~= -1.6 and LDLJ ~= -6
-(Balasubramanian et al., IEEE TBME 2012). Robot/vehicle telemetry won't
-literally match those numbers — what matters is the *relative* ranking within
-your own batch, which is exactly what `overall_score` gives you.
+`psd_lf_hf` is this plugin's own Welch band-ratio metric on the speed profile.
+It is an analog of, not a reproduction of, the PSD data-quality metric in
+Sojib & Begum ([arXiv:2605.01544](https://arxiv.org/abs/2605.01544)), which
+sums raw DFT power on 3D end-effector position. The name overlap is
+coincidental and the numbers are not comparable to that paper's.
 
-Each motion metric is also computed at p95 across an episode's windows
-(`quality.sparc_p95`, etc., visible via the sidebar/`dataset.values()`, not
-in the table) — the median tells you the episode's typical smoothness, the
-p95 catches a single bad stretch that a median would wash out.
+SPARC and LDLJ come from movement-smoothness work on human point-to-point
+reaching, where healthy reaches land near SPARC -1.6 and LDLJ -6
+(Balasubramanian et al., IEEE TBME 2012). Robot and vehicle telemetry won't
+match those numbers literally. What matters is the ranking within your own
+batch, which is what `overall_score` gives you.
 
 ## The Health tab
 
-A pass/warn/fail bar chart plus a table of the same verdicts per episode —
-each non-pass verdict names the worst offending metric in a "Worst metric"
-column, so a "fail" tells you what to look at, not just that something's
-wrong. Clicking a verdict bar filters the samples panel to the episodes
-with that verdict; clicking a table row opens the episode. Everything is computed generically from message timestamps — none of this depends on
-motion, and the formulas apply the same way regardless of channel kind. The
-health channel picker only offers `telemetry` and `scalar_sidecar` channels
-today, though: camera channels would work fine mathematically, but the
-engine's decode path doesn't support them yet (see [Known
-limitations](#known-limitations)).
+A pass/warn/fail bar chart and a per-episode verdict table. Each non-pass
+verdict names the metric with the highest z-score in a **Worst metric**
+column, so a "fail" tells you what to inspect. Click a verdict bar to filter
+the samples panel to the episodes with that verdict; click a table row to open
+the episode.
 
-| Field | What it measures | Direction |
+| Field | What it measures | How to read it |
 |---|---|---|
-| `health.dropout` | Fraction of gaps between messages more than 3x the channel's expected inter-arrival time | Higher = more dropped/missing messages |
-| `health.desync_ms` | Worst nearest-neighbor timestamp offset between any two scored channels, in ms | Higher = channels drifting further apart in time |
-| `health.clock_drift_ppm` | Trend of `log_time` vs `publish_time` over the episode | Larger magnitude = one clock running faster/slower than the other (sign is discarded — only magnitude is scored) |
-| `health.rate_cov` | Coefficient of variation of inter-arrival times | Higher = less steady sampling rate |
-| `health.clipping_frac` | Fraction of samples pinned at their own observed min/max | Higher = more values sitting at what looks like a sensor/actuator limit (heuristic — see [Known limitations](#known-limitations)) |
+| `health.dropout` | Estimated fraction of expected messages lost to gaps longer than 3x the channel's expected inter-arrival time, weighted by how many messages each gap swallowed | Higher means more missing messages. A 100-message gap and a 4-message gap score differently |
+| `health.desync_ms` | Best-case nearest-neighbor timestamp offset between the worst-aligned pair of scored channels, in milliseconds | Higher means two channels drifting apart in time. Single-digit ms is normal for most rigs; tens of ms between camera and proprioception misaligns image/action pairs |
+| `health.clock_drift_ppm` | Magnitude of the `log_time` vs `publish_time` trend over the episode, in parts per million | Hardware crystals drift by tens of ppm. Hundreds or worse means a clock is misbehaving. Unavailable when the channel carries only one timestamp source |
+| `health.rate_cov` | MAD-based coefficient of variation of inter-arrival times | Near 0 is metronomic. Higher means jittery timing, often a loaded compute box or lossy transport |
+| `health.clipping_frac` | Fraction of samples pinned at their own observed min/max, over the dimensions where that means anything | Higher means more values sitting at what looks like a sensor or actuator limit. A heuristic; see [Limits](#limits) |
 
-A verdict is **fail** if any health metric's z-score hits the fail threshold
-(z >= 3), **warn** if any hits the warn threshold (z >= 2) but none fail,
-else **pass**. Verdicts need at least one completed scoring run on the
-dataset (`quality_panel` reads the cached normalization stats from the
-`demo_quality_scorer` run) — until then every episode shows `unknown`.
+Each metric is reduced to one episode-wide number, the median across whatever
+contributed to it (channels, field groups, or channel pairs). Desync is the
+exception, since it is a property of a channel pair rather than a channel: the
+episode reports its worst pair, because a single badly skewed pair is enough to
+misalign the data.
+
+A verdict is **fail** if any health metric hits z >= 3, **warn** if any hits
+z >= 2 without failing, otherwise **pass**. Verdicts need one completed scoring
+run on the dataset, because they read the normalization stats cached under the
+`demo_quality_scorer` run key. Until then every episode reads `unknown`, which
+means unmeasured rather than healthy.
 
 ## The Outliers tab
 
-A scatter of `iforest_score` (x) vs `knn_dist` (y), one point per episode —
-points that cleared the outlier warn threshold (`is_outlier`) render red.
-Click any point for the same open-episode-plus-notify deep-link as the
-Motion/Health tables.
+A scatter of `iforest_score` (x) against `knn_dist` (y), one point per episode.
+Points that cleared the warn threshold render red. Top-right points are
+unusual by both measures. Click any point to open that episode.
 
-| Field | What it measures | Direction |
+| Field | What it measures | How to read it |
 |---|---|---|
-| `iforest_score` | Isolation-forest anomaly score over every computed metric (motion + health), fit across the current batch | Higher = more anomalous relative to the rest of the batch |
-| `knn_dist` | Mean distance to the 5 nearest neighboring episodes in that same metric space | Higher = sits further from everything else — the one signal in the plugin that reacts to an episode's overall state, not just its motion smoothness or timestamps |
-| `is_outlier` | `True` if either z-score above clears the warn threshold | A coarse "worth a second look" flag, not a verdict |
+| `iforest_score` | Isolation-forest anomaly score over every computed metric, fit across the batch | Higher is more anomalous relative to the rest of the batch |
+| `knn_dist` | Mean distance to the 5 nearest neighboring episodes in that same space | Higher means it sits further from everything else. This is the one signal here that reacts to an episode's overall character rather than its smoothness or its timestamps alone |
+| `is_outlier` | True if either score clears z >= 2 | A coarse "worth a second look" flag |
 
-Both models need a real corpus to fit against (`n < 2` returns all-NaN) and
-get more meaningful with more episodes — a handful of samples will produce
-noisy, low-confidence outlier scores.
+Both models are fit on the batch's oriented z-scores rather than raw values,
+so a `jerk_rms` in the thousands can't drown out a `dropout` in `[0, 1]` in the
+Euclidean distance. The `_worst` tail columns are held out of the feature
+matrix, since each is a percentile of the same per-window distribution its
+median twin already summarizes. Both scores are weighted 0.5x in
+`overall_score`, because they are functions of every other metric already in
+the sum.
 
-**Outlier channel selection is real.** Both models are fit on the batch's
-already-computed quality scalars — each selected motion channel's
-per-channel values plus the health metrics. The form's outlier channel
-picker restricts which channels' motion feature columns feed the models
-(leave it empty for all selected motion channels); health features are
-episode-wide medians, so they always contribute. Normalization stats and
-z-scores are never affected by this filter — it only changes what the
-outlier models see. The **Outliers** toggle itself skips fitting both
-models entirely and removes them from `overall_score`.
+Both need a real corpus to fit against. Fewer than two episodes returns NaN,
+and a handful of episodes produces noisy, low-confidence scores.
 
-## Bulk triage
+These models flag *unusual*, not *bad*. Your one exceptionally clean demo is
+an outlier too, and so is the episode recorded in a different room. See the
+[cross-task caveat](#what-signal-to-expect-from-your-data) before reading much
+into a ranking over mixed tasks.
 
-The two buttons at the bottom of the panel tag episodes `review` or
-`exclude-candidate`. If you have samples selected in the grid, only those
-get tagged; with nothing selected, the *entire current view* gets tagged.
-The button labels state the scope explicitly ("Tag 3 selected" vs "Tag all
-40 in view") — read them before clicking, and filter down to what you
-actually mean to tag first. Tags are just FiftyOne
-sample tags: nothing is deleted or hidden, `exclude-candidate` is a view you
-build later (`dataset.match_tags("exclude-candidate", bool=False)`), not an
-automatic filter.
+## How a score is computed
 
-## Which metrics matter for which dataset type
+**Windows.** Motion metrics are computed on 2-second windows at 50% overlap,
+on each channel's own timestamps, and windows need at least 5 samples to be
+scored. Every window spans the full window length: several of these metrics
+are duration-dependent (LDLJ's dimensionless jerk scales as roughly duration
+to the fourth), so a short trailing window is not comparable to the full ones
+it would be normalized against. An episode summarizes its windows twice, as a
+median and as a worst window.
 
-The engine is fully generic — it never hardcodes a topic or schema name —
-but how much signal each tab gives you depends on what's in your channels:
+**Per-channel normalization.** Every metric is z-scored against the batch's
+own distribution for that exact (metric, channel) pair, never pooled across
+channels, because a gripper's units and a shoulder joint's aren't comparable.
+Episode-level and window-level values are also fit separately: per-window
+values spread out far more than medians-over-windows, and z-scoring one
+against the other's stats would flag almost every above-average window.
+
+**The scale.** Z-scores are median-based, so a few gross outliers don't
+inflate the denominator. The scale is fit from the bad side of the median only,
+as the semi-interquartile range on that side (`p75 - p50` where higher is
+worse, `p50 - p25` where lower is worse). On a symmetric distribution that is
+identical to an ordinary MAD. Real per-window telemetry is strongly skewed,
+though, and a two-sided MAD averages in the narrow good side, which understates
+how much room the bad side actually has.
+
+Metrics that read exactly zero across most of a clean corpus (`dropout`,
+`clock_drift_ppm`, `desync_ms`) have no spread to measure, so their scale is
+set such that a typical member of the nonzero tail lands on the warn
+threshold. Being in the tail at all earns a glance, and being further out earns
+proportionally more. Z-scores are clipped at +/-10 as a backstop for a corpus
+with no variation whatsoever.
+
+**Worst-of across channels.** Per-channel z-scores are combined by taking the
+worst: the highest z per metric drives the episode's top-level value,
+`overall_score`, and `n_flags`. RINSE
+([arXiv:2604.23000](https://arxiv.org/abs/2604.23000)) averages smoothness
+across both arms when filtering bimanual training data, validated against
+downstream policy success, and averaging is the right call for that job.
+Filtering asks how good an episode is as training signal overall. Triage asks
+whether anything here deserves a human's attention, and a jerky right arm
+averaged against a smooth left arm looks fine. Movement science reports
+smoothness per limb and defines no standard cross-limb aggregate, so
+per-channel scoring with an explicit rollup is the honest middle ground. Every
+per-channel value stays on the sample in `quality.motion_by_channel` and in the
+panel's hover breakdowns, so the rollup hides nothing.
+
+**Weights.** `overall_score` is a weighted mean over the metrics that were
+actually computed. Disabling a family removes its metrics and renormalizes the
+remaining weights rather than diluting the average with zeros. `jerk_rms` is
+weighted 0.3x and the two outlier scores 0.5x; everything else is 1.0.
+`idle_frac` and `saturation_frac` are reported for context and are not scored,
+because neither is inherently bad at any level.
+
+**`quality.config_version`.** Written on every sample, and bumped whenever a
+formula change would move already-written scores. If a view mixes samples
+carrying different values (you scored half the dataset, then updated the
+plugin, then scored the rest), the panel shows a banner rather than blending
+incomparable rankings. Re-run over the whole view to fix it.
+
+## Flagged intervals and the timeline
+
+A window whose metric clears the warn or fail threshold against the
+window-level statistics becomes an interval, written two ways:
+
+- `quality_intervals` on the sample, as `{channel, metric, start, end, value,
+  severity}`, where `metric` is `<field group>.<metric>`. This is the
+  queryable copy.
+- A multimodal temporal tag labeled `<channel>:<group>.<metric>:<severity>`,
+  for example `/left-arm-state:position.jerk_rms:fail`. This is what puts a
+  colored, clickable span on the multimodal player's timeline.
+
+Windows overlap, so one real event flags two or more consecutive windows;
+touching flags of the same series are merged into a single span that reports
+the worst of what it absorbed.
+
+Temporal tags are the only mechanism confirmed to render on the multimodal
+player's timeline. FiftyOne's `TemporalDetections` label type looks like the
+obvious tool for a labeled time interval and does appear in the sidebar and as
+grid-thumbnail overlay text, but the multimodal timeline builds its tracks
+exclusively from the temporal-tags collection, a separate store from sample
+fields. A `TemporalDetections` field can look correctly populated everywhere
+except the one place you want it.
+
+Every temporal tag this plugin writes carries the internal anchor
+`demo_quality_scorer`, so a re-run clears exactly its own tags on the samples
+in that run and never touches a tag you drew by hand on the timeline.
+Re-running over a smaller view leaves every other sample's tags alone.
+
+Expect many short spans on a long, dynamic episode. Jerk RMS has bursts of
+roughness around every grasp, release, and sharp turn, and there is one
+independent flag stream per (channel, field group, metric). Four channels with
+four field groups each, scored on four metrics, is 64 streams, and each one
+contributes its own worst few percent of windows. On `Voxel51/ABC-130k` that
+works out to a median of about 60 flagged spans on an 87-second episode. What
+deserves investigation is a sustained `fail` span, or an episode with a high
+`n_flags` across several unrelated metrics at once, rather than a raw span
+count.
+
+## Tagging for review
+
+Two buttons at the bottom of the panel tag episodes `review` or
+`exclude-candidate`. The button labels state their scope before you click:
+`Tag 3 selected: review` when you have samples selected in the grid, or
+`Tag all 40 in view: review` when you don't. With nothing selected, the entire
+current view gets tagged, so filter down to what you mean first.
+
+These are ordinary FiftyOne sample tags. Nothing is deleted or hidden, and
+`exclude-candidate` is a view you build later, not an automatic filter:
+
+```python
+keep = dataset.match_tags("exclude-candidate", bool=False)
+```
+
+## What signal to expect from your data
+
+The engine never hardcodes a topic or schema name, so it runs on any MCAP
+producer. How much each tab tells you depends on what your channels carry.
 
 | Domain | Motion tab | Health tab | Outliers tab |
 |---|---|---|---|
-| **Manipulation / teleop** (joint positions, end-effector pose, gripper state) | Strong signal. Catches jerky corrections, operator-fatigue jitter, kickback after contact | Strong for cross-arm/cross-sensor desync between telemetry channels (multi-camera desync isn't checked today — see [Known limitations](#known-limitations)) | Strong once you have enough episodes *of the same task* (see caveat below) |
-| **Autonomous vehicles** (pose, velocity, steering telemetry) | Strong — harsh braking/steering corrections and sensor-glitch-induced motion noise both show up as high jerk / low SPARC | Strong across telemetry channels (LiDAR/IMU/GPS) — dropout and desync are common real failure modes; camera channels aren't checked yet (see [Known limitations](#known-limitations)) | Strong |
-| **UAV / drone** (flight-controller position/velocity/attitude) | Strong — wind-gust artifacts and control-loop oscillation both surface as roughness | Strong | Strong |
-| **Rover** (wheel odometry, pose) | Strong — stuck-and-slip and terrain jitter both surface as roughness | Strong | Strong |
-| **Egocentric / wearable** (head/body pose, IMU) | Weaker discriminator — head turns are usually *intentional*, not a quality problem, so high jerk doesn't always mean "bad." Still useful for catching literal camera shake / sensor glitches | Strong — still just timestamps | Moderate |
-| **Camera-only, no telemetry channels** | No signal — Motion auto-unchecks itself (no numeric channel to pick), so `quality.sparc` etc. won't be written | No signal today — rate/dropout only need message timestamps and would work just as well on a camera channel, but the health picker currently only offers `telemetry`/`scalar_sidecar` channels (see [Known limitations](#known-limitations)) | Falls back to whatever health metrics exist; weak without motion features |
+| **Manipulation / teleop** (joint positions, end-effector pose, gripper state) | Strong. Catches jerky corrections, operator-fatigue jitter, kickback after contact | Strong for cross-arm and cross-sensor desync between telemetry channels | Strong once you have enough episodes of the same task |
+| **Autonomous vehicles** (pose, velocity, steering) | Strong. Harsh braking and steering corrections show up as high jerk and low SPARC | Strong across LiDAR/IMU/GPS telemetry, where dropout and desync are common real failure modes | Strong |
+| **UAV / drone** (flight-controller position, velocity, attitude) | Strong. Wind-gust artifacts and control-loop oscillation both surface as roughness | Strong | Strong |
+| **Rover** (wheel odometry, pose) | Strong. Stuck-and-slip and terrain jitter both surface as roughness | Strong | Strong |
+| **Egocentric / wearable** (head or body pose, IMU) | Weaker. Head turns are usually intentional, so high jerk doesn't always mean bad. Still catches literal camera shake and sensor glitches | Strong, since it only needs timestamps | Moderate |
+| **Camera-only, no telemetry** | No signal. Motion switches itself off and no `quality.sparc` is written | No signal today; the health picker only offers decodable channels, so camera channels are left out (see [Limits](#limits)) | Falls back to health metrics, and is weak without motion features |
 
-**Important caveat on Outliers and cross-task comparison:** isolation forest
-and kNN manifold distance compare episodes to *each other* in the current
-batch. If your batch mixes many different tasks (as in a diversity-sampled
-dataset), an episode can rank as an outlier simply because its task
-inherently involves more or faster motion than the rest of the batch — not
-because it's a bad demonstration. In validation against `Voxel51/ABC-130k`
-(40 episodes across 40 different tasks), the two top-ranked "worst" episodes
-were folding tasks (folding a t-shirt, folding a paper airplane) — plausibly
-just more dynamic bimanual tasks, not necessarily poor teleoperation. Run the
-scorer over episodes of the *same task* when you want a clean apples-to-apples
-anomaly ranking, or treat cross-task outlier flags as "worth a look" rather
-than "probably bad," per the triage philosophy at the top of this doc.
+**Cross-task comparison caveat.** Isolation forest and kNN distance compare
+episodes to each other within the batch you scored. If that batch mixes many
+tasks, an episode can rank as an outlier because its task involves more or
+faster motion than the rest, not because it was performed badly. Scoring
+`Voxel51/ABC-130k` (40 episodes across 40 different tasks) puts two folding
+tasks at the top, which are plausibly just the most dynamic bimanual tasks in
+the set. Score episodes of the same task when you want a clean apples-to-apples
+anomaly ranking, and treat cross-task outlier flags as worth a look rather than
+probably bad.
 
-## Reading `quality_intervals` and the timeline
+## Limits
 
-Every window whose metric clears the warn/fail threshold against the
-*window-level* corpus statistics (not the episode-level ones used for
-`overall_score` — window values are naturally noisier, so they're normalized
-separately) becomes an interval: `{channel, metric, start, end, value,
-severity}`, stored in `quality_intervals` (queryable data) **and** written as
-a multimodal *temporal tag* on that sample, labeled
-`"<channel>:<group>.<metric>:<severity>"` (e.g.
-`"/left-arm-state:position.jerk_rms:fail"`) — this is what puts a colored,
-clickable span on the multimodal player's timeline so you can see exactly
-where a flag is and scrub straight to it.
-
-It's easy to get this wrong: FiftyOne has a `TemporalDetections` label type
-that looks like the obvious tool for "a labeled time interval," and it does
-show up in the sidebar and as grid-thumbnail overlay text — but the
-multimodal player's timeline builds its tracks *exclusively* from the
-temporal-tags collection (a separate store from sample fields). A
-`TemporalDetections` field is never read by the multimodal timeline code at
-all, so it can look correctly populated everywhere except the one place you
-want it. Temporal tags are the only mechanism confirmed to render on the
-multimodal player's timeline. They live in FiftyOne's `fiftyone.core.tags`
-module — undocumented/internal today, not the same programmatic-creation API
-a person's manual shift-drag on the timeline uses to end up in the same
-place, but it works.
-
-Every temporal tag this plugin writes carries an internal `anchor` of
-`"demo_quality_scorer"`, so re-running the operator can find-and-clear
-exactly its own tags first (samples in the run's view only) without ever
-touching a tag you drew by hand on the timeline. Re-running with a smaller
-view or a different channel selection only re-tags the samples actually in
-that run — everything else keeps whatever it was last scored with.
-
-Expect many small intervals/tags on a long, dynamic episode — a metric like
-`jerk_rms` naturally has bursts of roughness around every grasp/release or
-sharp turn, so a handful of short flagged spans scattered through an episode
-is normal, not a bug. What's worth investigating is a *sustained*
-`fail`-severity tag, or an episode with a high `n_flags` across multiple
-unrelated metrics at once.
-
-## As-built deviations from the original PRD
-
-The plugin's original design doc (the "Demo Quality Scorer" PRD) predates
-some real decisions made while building and validating it. Rather than
-bending the code back toward stale spec text, this section documents where
-the as-built plugin diverges and why — the code is the source of truth:
-
-- **Channel discovery** classifies channels by shape (`camera` /
-  `telemetry` / `scalar_sidecar` / `other`, from `message_encoding` +
-  schema structure), never by a fixed table of expected schema/topic names.
-  A schema-name roles table was tried and rejected during validation: it
-  classified zero channels on `Voxel51/ABC-130k` (a protobuf-encoded
-  dataset), while shape-based discovery worked immediately and generalizes
-  to any MCAP producer. Shape beats name.
-- **Interval flags** are real multimodal *temporal tags*
-  (`fiftyone.core.tags`), not a `TemporalDetections` label field. An
-  earlier iteration used `TemporalDetections`, which does show up in the
-  sidebar and grid-overlay text but is **never read by the multimodal
-  player's timeline** (confirmed against FiftyOne's own frontend/backend
-  source) — so it looked correct everywhere except the one place a
-  "scrub to this flag" feature needs it.
-- **`psd_lf_hf`** is this plugin's own Welch band-ratio-on-speed metric, an
-  analog of — not a reproduction of — Sojib & Begum's PSD data-quality
-  metric (arXiv:2605.01544). See [The Motion tab](#the-motion-tab).
-- **`resolve_input`** is a family-first form (Motion / Sensor health /
-  Outliers, each independently toggleable), replacing an earlier flat
-  "pick every channel to score" list. The rescope keeps a health-only run
-  (camera-only episodes, or anyone who just wants sensor-health checks)
-  a first-class, clearly-labeled path instead of an implicit side effect
-  of unchecking everything else.
-- **Motion channels are multi-select, scored per channel, rolled up
-  worst-of** (`config_version` 3). The PRD-era single channel picker made a
-  bimanual rig half-blind: score one arm and a jerky other arm ranks clean.
-  Channels are normalized per (metric, channel) — units differ across
-  channels — and the worst z per metric drives the episode. See [Why
-  worst-of across channels](#why-worst-of-across-channels) for why this
-  intentionally diverges from RINSE's cross-arm averaging.
-- **Idle threshold and jerk RMS** were tuned after initial validation: the
-  idle-speed threshold is relative to each episode's own median speed
-  (`idle_alpha * median(speed)`) rather than one fixed absolute value
-  (which doesn't generalize across a channel's unit scale — rad/s vs m/s
-  vs normalized), and `jerk_rms` low-pass filters the speed profile before
-  differentiating (differentiation amplifies sensor noise by omega²,
-  so an unfiltered RMS jerk on real telemetry is mostly noise). Both
-  changes shift already-computed scores, tracked via
-  `quality.config_version` (see [Running the
-  scorer](#running-the-scorer)).
-
-## Known limitations
-
-- **No programmatic playhead seek.** Clicking a row/point opens the episode
-  and shows a toast with the flagged timecode; you still have to scrub the
-  timeline yourself.
-- **`clipping_frac` is a heuristic**, not hardware-calibrated: it flags
-  values pinned at the channel's own *observed* min/max, since there's no
-  generic way to know a real actuator or sensor's true limits.
-- **Remote/cloud `.mcap` files** are read with a plain local `open()`;
-  efficient byte-range reads over cloud storage are not implemented.
-- **Temporal tags are written via an undocumented, internal FiftyOne API**
-  (`fiftyone.core.tags`), not the public SDK — it works in the version this
-  plugin was built against but carries no stability guarantee, and a future
-  FiftyOne release could change or remove it without notice.
-- Re-running the operator **overwrites** `quality*` fields and the cached
-  normalization stats for the run key `demo_quality_scorer`; there's no
-  versioning across runs.
-- **`config_version` mismatches are a warning, not a hard block.** The
-  panel flags a view that mixes samples scored under different metric
-  formulas, but it still renders the ranking/histograms below the
-  banner — treat them as not-yet-comparable until you re-score.
-- **The Sensor health channel picker only offers `telemetry` and
-  `scalar_sidecar` channels**, not `camera`, even though rate/dropout only
-  need message timestamps and would work fine on a camera channel too. The
-  engine's decode path doesn't support camera channels yet (it would need a
-  lightweight timestamp-only read instead of a full frame decode), so
-  they're left out of the picker rather than offered and quietly no-op'd.
-- **Outlier feature selection is channel-level only** — you can pick which
-  channels feed the models, but not individual features (metrics); see
-  [The Outliers tab](#the-outliers-tab).
+- **No programmatic playhead seek.** Clicking a row or point opens the episode
+  and toasts the flagged timecode. You still scrub the timeline yourself.
+- **`clipping_frac` and `saturation_frac` are heuristics**, not
+  hardware-calibrated. They flag values pinned at a channel's own observed
+  min/max, since nothing in an MCAP file exposes a real actuator or sensor
+  limit. Dimensions with fewer than three distinct values are skipped, so a
+  real saturation event captured at only two levels is missed. The alternative
+  reports every boolean status bit as permanently saturated. Note also that
+  these can't read exactly 0: a clean signal still has one argmin and one
+  argmax.
+- **`desync_ms` can't resolve skew that is a whole multiple of the denser
+  channel's sample interval.** A channel shifted by exactly one or two of the
+  other's periods lands back on its timestamps and reads as aligned. This is
+  inherent to nearest-neighbor timestamp matching without a shared reference
+  event. It also reports best-case alignment, so a pair aligned for a small
+  part of an episode and adrift for the rest reads as aligned.
+- **Warn and fail thresholds (z >= 2, z >= 3) are calibrated for a normal
+  distribution, and window-level metrics have heavier tails than that.** The
+  warn band lands about where a normal predicts (~2.2% of windows), but
+  fail-severity windows run around 4% against a normal's 0.13%. Combined with
+  one flag stream per (channel, field group, metric), a long dynamic episode
+  accumulates many short spans.
+- **The health channel picker only offers `telemetry` and `scalar_sidecar`
+  channels**, not `camera`. Rate and dropout need nothing but message
+  timestamps and would work fine on a camera channel, but the decode path
+  doesn't support camera channels yet, so they are left out of the picker
+  rather than offered and silently ignored.
+- **Outlier feature selection is channel-level only.** You can choose which
+  channels feed the models, not which individual metrics.
+- **Remote and cloud `.mcap` files** are read with a plain local `open()`.
+  Byte-range reads over cloud storage are not implemented.
+- **Temporal tags are written through `fiftyone.core.tags`**, an internal,
+  undocumented API rather than the public SDK. It works in the version this
+  plugin was built against and carries no stability guarantee.
+- **Re-running overwrites** the `quality*` fields and the cached normalization
+  stats under the `demo_quality_scorer` run key. There is no versioning across
+  runs.
+- **A `config_version` mismatch is a warning, not a hard block.** The panel
+  flags a mixed view and still renders the ranking below the banner. Treat
+  those scores as not yet comparable.

@@ -11,6 +11,15 @@ from .panel_data import build_panel_data, worst_interval_message
 
 
 class GetQualityPanelData(foo.Operator):
+    """Serves the panel its entire dataset in one call.
+
+    Deliberately one round trip: the frontend needs every episode's metrics to
+    draw distributions and to resolve chart clicks to sample IDs client-side,
+    so paginating here would just mean the panel re-requesting everything.
+    Called with both `ctx.dataset` and `ctx.view` so the payload can report
+    corpus-wide context while respecting what the user is currently filtered to.
+    """
+
     @property
     def config(self):
         return foo.OperatorConfig(name="get_quality_panel_data", unlisted=True)
@@ -46,6 +55,20 @@ class OpenQualityEpisode(foo.Operator):
 
 
 class TagQualityEpisodes(foo.Operator):
+    """Records a reviewer's verdict as a sample tag.
+
+    Tags, not a new field: the whole point of the scorer is that a human
+    decides, and a tag is the artifact the rest of FiftyOne (views, exports,
+    other plugins) already understands, so a verdict is usable outside this
+    panel.
+
+    An empty `sample_ids` falls back to the current view, which is what makes
+    "tag everything I'm looking at" work after the user filters to a bad
+    cohort -- but it also means a caller that meant "tag nothing" would tag
+    the view, so the frontend is responsible for not calling with an empty
+    selection it didn't intend.
+    """
+
     @property
     def config(self):
         return foo.OperatorConfig(name="tag_quality_episodes", unlisted=True)

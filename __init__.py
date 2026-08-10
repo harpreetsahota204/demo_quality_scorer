@@ -11,6 +11,12 @@ from .panel_ops import (
 
 
 def register(p):
+    """FiftyOne's plugin entry point.
+
+    Only `ComputeEpisodeQuality` is listed in the operator browser; the rest
+    are the React panel's unlisted backend (see `panel_ops`) and must still be
+    registered here to be callable from it.
+    """
     p.register(ComputeEpisodeQuality)
     p.register(GetQualityPanelData)
     p.register(OpenQualityEpisode)

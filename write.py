@@ -75,7 +75,13 @@ def build_quality_document(scalars, config_version, motion_by_channel=None, moti
 
 
 def build_quality_intervals(intervals):
-    """Builds the ``quality_intervals`` field payload for one sample."""
+    """Builds the ``quality_intervals`` field payload for one sample.
+
+    The same flags `build_temporal_tags` puts on the timeline, stored a second
+    time as an ordinary sample field. Temporal tags render but aren't readable
+    as sample data, so this is what lets the panel and view expressions
+    actually query what was flagged.
+    """
     return [fo.DynamicEmbeddedDocument(**interval) for interval in intervals]
 
 

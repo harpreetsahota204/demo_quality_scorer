@@ -73,6 +73,7 @@ def has_numeric_signal(filepath, channel):
 
 
 def _first_json_fields(filepath, topic):
+    """The numeric fields on a channel's first message, or ``{}`` if it has none."""
     with open(filepath, "rb") as f:
         for _, _, message in make_reader(f).iter_messages(topics=[topic]):
             return _json_numeric_fields(message.data)
@@ -80,6 +81,7 @@ def _first_json_fields(filepath, topic):
 
 
 def _first_structured_fields(filepath, topic):
+    """As `_first_json_fields`, for protobuf/ROS channels (needs the decoders)."""
     with open(filepath, "rb") as f:
         reader = make_reader(f, decoder_factories=_decoder_factories())
         for _, _, _, decoded in reader.iter_decoded_messages(topics=[topic]):
@@ -88,6 +90,12 @@ def _first_structured_fields(filepath, topic):
 
 
 def _json_numeric_fields(data):
+    """Keeps only the top-level numeric entries of a JSON message.
+
+    Sidecar channels routinely mix scalars with strings and nested objects
+    (labels, ids, status blobs). Only flat numerics can become a time series,
+    so everything else is dropped rather than coerced.
+    """
     return {key: float(value) for key, value in json.loads(data).items() if _is_number(value)}
 
 
@@ -109,6 +117,13 @@ def _decode_structured_channel(filepath, topic):
 
 
 def _decoder_factories():
+    """Whichever MCAP message decoders are installed, in encoding-priority order.
+
+    All three are optional dependencies: a user scoring protobuf episodes
+    shouldn't be forced to install the ROS stacks. Missing ones are skipped,
+    which surfaces later as "this channel has no numeric signal" rather than
+    an import error at plugin load.
+    """
     factories = []
     for module_name, class_name in (
         ("mcap_protobuf.decoder", "DecoderFactory"),
@@ -124,6 +139,15 @@ def _decoder_factories():
 
 
 def _walk_fields(message):
+    """Flattens a decoded message to ``{field_name: scalar}``.
+
+    Everything downstream (windowing, the motion metrics) works on flat named
+    scalars, so vectors are exploded into indexed names here. The naming is
+    what lets `windowing.field_groups` reassemble the original vector later:
+    ``position_0..5`` regroups, and a 4x4 transform is emitted as named
+    translation/euler components instead of 16 opaque matrix cells that would
+    be differentiated as if they were coordinates.
+    """
     out = {}
     for name, values in _iter_numeric_fields(message):
         if not values:
@@ -160,11 +184,24 @@ def _iter_numeric_fields(message):
 
 
 def _is_number(value):
+    """True for real numeric scalars. Bools are excluded despite being ints.
+
+    A boolean channel (gripper open/closed, e-stop) is a state flag, not a
+    measurement: differentiating it produces meaningless "speed" spikes at
+    every toggle, and its two distinct values look like a pinned sensor to the
+    clipping check.
+    """
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _is_homogeneous_transform(values):
-    """True iff a length-16 vector is a row-major 4x4 transform (last row [0, 0, 0, 1])."""
+    """True iff a length-16 vector is a row-major 4x4 transform (last row [0, 0, 0, 1]).
+
+    Detected by shape rather than by field name so it works on any producer.
+    The bottom-row test is what distinguishes a pose from an arbitrary
+    16-element array (a 16-DOF hand's joint vector, say) that must not be
+    reinterpreted as a matrix.
+    """
     if len(values) != 16:
         return False
     a, b, c, d = values[12:16]
@@ -172,7 +209,15 @@ def _is_homogeneous_transform(values):
 
 
 def _flatten_transform(name, values, out):
-    """Emits translation (``_x/_y/_z``) and ZYX-euler orientation for a 4x4 transform."""
+    """Emits translation (``_x/_y/_z``) and ZYX-euler orientation for a 4x4 transform.
+
+    Six interpretable degrees of freedom instead of 16 matrix cells, so a
+    pose channel differentiates into an actual velocity. Euler angles are
+    accepted knowing they wrap and can gimbal-lock: the alternative
+    (quaternions) has no meaningful scalar derivative either, and the
+    smoothness metrics only need a locally-continuous signal, which euler
+    gives everywhere except at the wrap.
+    """
     out[f"{name}_x"] = values[3]
     out[f"{name}_y"] = values[7]
     out[f"{name}_z"] = values[11]

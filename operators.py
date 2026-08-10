@@ -51,11 +51,29 @@ MOTION_METRIC_ROWS = (
 )
 
 HEALTH_METRIC_ROWS = (
-    ("dropout", "Dropout", "Fraction of inter-message gaps over 3x the expected interval."),
-    ("rate_cov", "Rate stability", "Coefficient of variation of message inter-arrival times."),
+    (
+        "dropout",
+        "Dropout",
+        "Estimated fraction of expected messages lost to gaps over 3x the "
+        "expected interval (weighted by how many each gap swallowed).",
+    ),
+    (
+        "rate_cov",
+        "Rate stability",
+        "Robust (MAD-based) coefficient of variation of message inter-arrival times.",
+    ),
     ("clock_drift_ppm", "Clock drift", "log_time vs publish_time drift trend, in ppm (magnitude only)."),
-    ("clipping_frac", "Clipping", "Fraction of samples pinned at their observed min/max (heuristic)."),
-    ("desync_ms", "Cross-channel desync", "Worst pairwise timestamp offset; needs at least 2 channels."),
+    (
+        "clipping_frac",
+        "Clipping",
+        "Fraction of samples pinned at their observed min/max (heuristic; "
+        "constant and boolean fields are excluded, not flagged).",
+    ),
+    (
+        "desync_ms",
+        "Cross-channel desync",
+        "Worst pairwise best-case timestamp offset; needs at least 2 channels.",
+    ),
 )
 
 
@@ -65,6 +83,12 @@ def _selected_metrics(cfg, rows):
 
 
 def _add_metric_checkboxes(section, rows):
+    """Renders a family's per-metric opt-outs, all on by default.
+
+    Opt-out rather than opt-in: a user who doesn't know these metrics should
+    get all of them and see which ones fire, and the descriptions carry the
+    caveats that would justify unchecking one.
+    """
     for key, label, description in rows:
         section.bool(
             f"metric_{key}",
@@ -108,6 +132,18 @@ def _channel_has_numeric_signal(filepath, channel):
 
 
 class ComputeEpisodeQuality(foo.Operator):
+    """The plugin's one listed operator: scores a view's episodes end to end.
+
+    A generator so a long run can report progress per episode instead of
+    freezing the App, and delegable because scoring decodes every MCAP file in
+    the view -- minutes of work on a real corpus.
+
+    Scores are batch-relative by construction (see `engine.score`), so the
+    unit of work is deliberately the whole target view: scoring a filtered
+    subset produces z-scores relative to *that* subset, which is a different
+    question than the one the same episode answers in a full-dataset run.
+    """
+
     @property
     def config(self):
         return foo.OperatorConfig(
@@ -125,9 +161,18 @@ class ComputeEpisodeQuality(foo.Operator):
         )
 
     def resolve_delegation(self, ctx):
+        """Defaults to delegated once the view is big enough to block the App."""
         return len(ctx.target_view()) > DELEGATION_THRESHOLD
 
     def resolve_input(self, ctx):
+        """Builds the form from what the episodes actually contain.
+
+        Nothing here is a fixed sensor list: the channel pickers and the
+        Motion-family availability all come from discovery on a real file, so
+        the same form works on a ROS bag and a protobuf recording. Warnings are
+        soft -- the form never blocks Run, it explains what will be skipped
+        (see `_build_validation_line`) and lets the user proceed.
+        """
         inputs = types.Object()
         view = ctx.target_view()
 
@@ -238,8 +283,8 @@ class ComputeEpisodeQuality(foo.Operator):
                     label="Windowing",
                     description=(
                         "Motion metrics are computed per window, then summarized per "
-                        "episode (median + p95). Windows only affect this family: health "
-                        "uses full-episode timestamps, outliers use episode scalars."
+                        "episode (median + worst window). Windows only affect this family: "
+                        "health uses full-episode timestamps, outliers use episode scalars."
                     ),
                 ),
             )
@@ -261,8 +306,12 @@ class ComputeEpisodeQuality(foo.Operator):
             section.float(
                 "idle_alpha",
                 default=activity.IDLE_ALPHA_DEFAULT,
-                label="Idle threshold (x median speed)",
-                description="Fraction of the episode's own median speed that counts as idle.",
+                label="Idle threshold (x p90 speed)",
+                description=(
+                    "Fraction of the episode's own 90th-percentile speed that counts as "
+                    "idle. A high percentile, not the median: a mostly-idle episode's "
+                    "median speed IS its idle floor."
+                ),
                 min=0.0,
             )
             if "jerk_rms" in motion_metrics:
@@ -364,6 +413,15 @@ class ComputeEpisodeQuality(foo.Operator):
         return types.Property(inputs, view=types.View(label="Compute episode quality"))
 
     def execute(self, ctx):
+        """Decodes every episode, then finalizes them as one batch.
+
+        The two loops are not merge-able: normalization and the outlier models
+        need every episode's raw metrics before any single episode's score
+        exists, so the whole corpus is held in memory (raw metrics only -- the
+        decoded telemetry is discarded per episode) between them.
+
+        Yields progress during the first loop, since that's the expensive one.
+        """
         # Per-family settings live in nested section objects (see resolve_input)
         motion_cfg = ctx.params.get("motion_cfg") or {}
         health_cfg = ctx.params.get("health_cfg") or {}
@@ -442,6 +500,7 @@ class ComputeEpisodeQuality(foo.Operator):
         yield {"scored": n, "flagged": flagged}
 
     def resolve_output(self, ctx):
+        """A count only -- the panel, not a modal, is where results get read."""
         outputs = types.Object()
         result = ctx.results or {}
         outputs.str(
@@ -515,6 +574,18 @@ def _register_run(
     jerk_cutoff_hz,
     norm_stats,
 ):
+    """Records what produced this run's scores, and the stats needed to reuse them.
+
+    Two jobs. The config makes a run auditable and comparable: every knob that
+    changes a score is stored alongside `config_version`, so the panel can tell
+    that two episodes were scored under different formulas rather than silently
+    ranking them together. The cached `norm_stats` are what let a later
+    consumer z-score a new value against this run's corpus without refitting
+    the whole batch.
+
+    Overwrites on every run: this is the dataset's current scoring state, not a
+    history. A previous run's stats no longer describe what's on the samples.
+    """
     cfg = dataset.init_run(
         motion_topics=sorted(motion_topics),
         motion_metrics=list(motion_metrics),

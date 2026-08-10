@@ -62,6 +62,8 @@ def build_panel_data(dataset, view):
                 "health_reason": reason,
             }
         )
+    # Worst-first is the panel's entire premise: the point of scoring is that a
+    # reviewer reads down from the top and stops when episodes look fine.
     rows.sort(key=lambda r: -(r["overall_score"] or 0.0))
 
     channels = sorted({channel for r in rows for channel in r["by_channel"]})
@@ -99,15 +101,25 @@ def build_panel_data(dataset, view):
         "motion_scored": any(r[m] is not None for r in rows for m in MOTION_METRICS),
         "health_scored": has_health,
         "outliers_scored": any(r["iforest_score"] is not None for r in rows),
+        # Every score here is relative to the corpus it was fit against, so
+        # mixing formula versions in one ranking is meaningless. Reported so the
+        # panel can say so rather than quietly sorting incomparable numbers.
         "config_version_mismatch": len(config_versions) > 1,
     }
 
 
 def worst_interval_message(sample):
-    """The deep-link toast text for one opened episode, or None."""
+    """The deep-link toast text for one opened episode, or None.
+
+    Tells the reviewer where to scrub, because FiftyOne can't seek the playhead
+    programmatically -- opening the episode is as far as `OpenQualityEpisode`
+    can get them.
+    """
     intervals = getattr(sample, "quality_intervals", None)
     if not intervals:
         return None
+    # Any `fail` interval, else the first one. Naming a single timestamp is the
+    # job here; the timeline's temporal tags already show all of them.
     worst = max(intervals, key=lambda iv: iv.severity == "fail")
     return (
         f"Flag at {worst.start:.1f}-{worst.end:.1f}s "
@@ -116,6 +128,12 @@ def worst_interval_message(sample):
 
 
 def _episode_stats(dataset):
+    """The scoring run's cached episode-level normalization stats, or None.
+
+    Without them the panel can still list every raw value, but nothing can be
+    called good or bad -- thresholds and verdicts only exist relative to the
+    corpus distribution these describe.
+    """
     if not dataset.has_run(RUN_KEY):
         return None
     results = dataset.load_run_results(RUN_KEY)
@@ -123,6 +141,13 @@ def _episode_stats(dataset):
 
 
 def _health_verdict(health, episode_stats):
+    """One pass/warn/fail for an episode's whole health family, plus the metric to blame.
+
+    Five health numbers are too many for a table column a reviewer scans, and
+    the useful question is binary anyway: is anything wrong with this
+    recording. `"unknown"` (not `"pass"`) when the family was never scored --
+    unmeasured is not the same as healthy.
+    """
     if episode_stats is None or health is None:
         return "unknown", ""
 
@@ -133,6 +158,12 @@ def _health_verdict(health, episode_stats):
 
 
 def _episode_label(sample):
+    """A human-recognizable name for a row.
+
+    Prefers a `task` field if the dataset has one, else the episode
+    directory's name -- MCAP filenames are commonly non-distinct
+    (``data.mcap``) while their parent directory is the episode id.
+    """
     return getattr(sample, "task", None) or sample.filepath.rsplit("/", 2)[-2]
 
 
@@ -193,6 +224,11 @@ def _channel_scores(by_channel, episode_stats):
 
 
 def _motion_worst_channel(quality_doc):
+    """``{metric: channel}`` attribution for the worst-of aggregation.
+
+    Lets the panel say *which* arm was jerky, not just that the episode was.
+    Empty for pre-v3 scores, which had no per-channel breakdown to attribute.
+    """
     doc = getattr(quality_doc, "motion_worst_channel", None)
     if doc is None:
         return {}
