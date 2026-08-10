@@ -46,9 +46,11 @@ for watch mode) and hard-refresh the browser.
    `.mcap`/`.bag`/`.rrd` samples).
 2. Run **Compute episode quality** from the Operator Browser, or click the
    **Compute episode quality** button in the empty Episode Quality panel.
-3. Fill in the form (below), then Run. Views over 50 samples are pushed to
-   delegated background execution automatically; smaller views run immediately
-   with a progress bar.
+3. Fill in the form (below), then Run. You choose the execution mode: run
+   immediately (with an in-App progress bar) or schedule as a delegated
+   background run, whichever the view size. Scheduling is the default since
+   scoring a real corpus takes minutes; delegated progress appears on the
+   Runs page instead of an in-App bar.
 4. Open the panel: **New panel → Episode Quality**. It refreshes whenever the
    current view changes, so filtering the grid re-ranks the panel to match.
 

@@ -16,7 +16,6 @@ from .engine.score import (
 )
 from .write import build_temporal_tags, clear_temporal_tags, write_sample
 
-DELEGATION_THRESHOLD = 50
 RUN_KEY = "demo_quality_scorer"
 
 # Per-metric checkbox rows: (key, label, short description). Research notes
@@ -180,16 +179,15 @@ class ComputeEpisodeQuality(foo.Operator):
                 "Scores episodes for motion smoothness, sensor health, and "
                 "outliers using the channels discovered on the current view."
             ),
+            # Both execution modes are always offered -- delegation is the
+            # user's choice, never forced or blocked by view size. Scoring a
+            # real corpus takes minutes, hence the delegated default.
             dynamic=True,
             execute_as_generator=True,
             allow_immediate_execution=True,
             allow_delegated_execution=True,
             default_choice_to_delegated=True,
         )
-
-    def resolve_delegation(self, ctx):
-        """Defaults to delegated once the view is big enough to block the App."""
-        return len(ctx.target_view()) > DELEGATION_THRESHOLD
 
     def resolve_input(self, ctx):
         """Builds the form from what the episodes actually contain.
@@ -528,7 +526,14 @@ class ComputeEpisodeQuality(foo.Operator):
                 idle_alpha=idle_alpha,
                 jerk_cutoff_hz=jerk_cutoff_hz,
             )
-            yield ctx.trigger("set_progress", {"progress": (i + 1) / n, "label": f"Scored {i + 1}/{n}"})
+            # A yielded trigger reaches the App's progress bar but goes
+            # nowhere in a delegated run; ctx.set_progress writes to the
+            # delegated operation's record (visible on the Runs page) but
+            # renders no bar in the App. One branch per mode, same message.
+            if ctx.delegated:
+                ctx.set_progress(progress=(i + 1) / n, label=f"Scored {i + 1}/{n}")
+            else:
+                yield ctx.trigger("set_progress", {"progress": (i + 1) / n, "label": f"Scored {i + 1}/{n}"})
 
         results, norm_stats = finalize_batch(
             raw_by_id, outliers_enabled=outliers_enabled, outlier_channels=outlier_channels
@@ -563,7 +568,11 @@ class ComputeEpisodeQuality(foo.Operator):
         )
 
         flagged = sum(1 for r in results.values() if r.n_flags > 0)
-        yield ctx.trigger("reload_dataset")
+        # ctx.trigger raises "No executor available" in a delegated run --
+        # there is no attached browser session to reload anyway; delegated
+        # results land when the user next loads the dataset.
+        if not ctx.delegated:
+            yield ctx.trigger("reload_dataset")
         yield {"scored": n, "flagged": flagged}
 
     def resolve_output(self, ctx):
