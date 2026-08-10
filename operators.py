@@ -129,6 +129,21 @@ def _channel_picker(section, name, choices, selected, **field_kwargs):
     section.list(name, types.String(), default=[], view=view, **field_kwargs)
 
 
+def _local_path(sample):
+    """The path to open ``sample``'s media from Python.
+
+    On FiftyOne Enterprise, ``filepath`` can be a cloud URI (``gs://``,
+    ``s3://``) that the engine's plain ``open()`` calls can't read.
+    ``sample.local_path`` is the Enterprise SDK's answer: it downloads and
+    caches the file locally on first access and returns that local path,
+    or returns ``filepath`` unchanged if it's already local. That attribute
+    doesn't exist in open-source FiftyOne, hence the ``getattr`` fallback --
+    everything downstream of this (the whole ``engine/`` package) stays a
+    plain local-file reader either way.
+    """
+    return getattr(sample, "local_path", None) or sample.filepath
+
+
 # `dynamic=True` re-runs resolve_input on every form interaction, and
 # uncached that meant re-reading the MCAP summary plus one message per
 # telemetry channel on each toggle/keystroke. Episode files are immutable
@@ -196,7 +211,7 @@ class ComputeEpisodeQuality(foo.Operator):
         # channels across episodes. Fine for a view recorded by a single
         # producer/schema, which is the common case, but a heterogeneous view
         # will only offer the channels its first episode happens to carry.
-        filepath = view.first().filepath
+        filepath = _local_path(view.first())
         disc = list(_discover_scorable(filepath))
         if not disc:
             inputs.view(
@@ -461,7 +476,7 @@ class ComputeEpisodeQuality(foo.Operator):
         raw_by_id = {}
         for i, sample in enumerate(view):
             raw_by_id[sample.id] = compute_raw_episode_metrics(
-                sample.filepath,
+                _local_path(sample),
                 motion_topics=motion_topics,
                 health_topics=health_topics,
                 motion_metrics=motion_metrics,
