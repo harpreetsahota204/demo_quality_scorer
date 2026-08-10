@@ -175,7 +175,7 @@ the episode.
 |---|---|---|
 | `health.dropout` | Estimated fraction of expected messages lost to gaps longer than 3x the channel's expected inter-arrival time, weighted by how many messages each gap swallowed | Higher means more missing messages. A 100-message gap and a 4-message gap score differently |
 | `health.desync_ms` | Best-case nearest-neighbor timestamp offset between the worst-aligned pair of scored channels, in milliseconds | Higher means two channels drifting apart in time. Single-digit ms is normal for most rigs; tens of ms between camera and proprioception misaligns image/action pairs |
-| `health.clock_drift_ppm` | Magnitude of the `log_time` vs `publish_time` trend over the episode, in parts per million | Hardware crystals drift by tens of ppm. Hundreds or worse means a clock is misbehaving. Unavailable when the channel carries only one timestamp source |
+| `health.clock_drift_ppm` | Magnitude of the `log_time` vs `publish_time` trend over the episode, in parts per million | Hardware crystals drift by tens of ppm. Hundreds or worse means a clock is misbehaving. Reported as unavailable, not 0.0, when there is only one clock to read, which is the common case: many writers set `publish_time` equal to `log_time`. A constant nonzero offset is two real clocks with no relative drift and does report 0.0 |
 | `health.rate_cov` | MAD-based coefficient of variation of inter-arrival times | Near 0 is metronomic. Higher means jittery timing, often a loaded compute box or lossy transport |
 | `health.clipping_frac` | Fraction of samples pinned at their own observed min/max, over the dimensions where that means anything | Higher means more values sitting at what looks like a sensor or actuator limit. A heuristic; see [Limits](#limits) |
 
@@ -335,7 +335,25 @@ keep = dataset.match_tags("exclude-candidate", bool=False)
 ## What signal to expect from your data
 
 The engine never hardcodes a topic or schema name, so it runs on any MCAP
-producer. How much each tab tells you depends on what your channels carry.
+producer: protobuf, ROS 1, ROS 2 (`cdr`), and flat-JSON sidecars. Channels are
+classified by encoding and schema shape, and numeric fields are found by
+walking each message's own descriptors, including nested submessages, so a
+`foxglove.Odometry`'s velocity and a ROS `sensor_msgs/msg/Imu`'s angular rate
+are picked up without naming either.
+
+Two things are skipped on purpose. Timestamp and duration submessages are
+excluded by type, because a clock is a monotonic ramp and differentiating it
+manufactures a smooth constant-velocity signal that says nothing about the
+robot. Field groups whose speed never varies across the episode are skipped
+too, which covers covariance blocks, point-cloud dimensions and strides, camera
+intrinsics, and static transforms. Those channels still appear in the pickers;
+they just contribute nothing if you select one.
+
+A channel whose schema the installed decoder can't build types for (a ROS 2
+definition with a lowercase constant, a schema referencing an unresolvable
+package) is skipped like an empty channel rather than failing the run.
+
+How much each tab tells you depends on what your channels carry.
 
 | Domain | Motion tab | Health tab | Outliers tab |
 |---|---|---|---|
@@ -345,6 +363,11 @@ producer. How much each tab tells you depends on what your channels carry.
 | **Rover** (wheel odometry, pose) | Strong. Stuck-and-slip and terrain jitter both surface as roughness | Strong | Strong |
 | **Egocentric / wearable** (head or body pose, IMU) | Weaker. Head turns are usually intentional, so high jerk doesn't always mean bad. Still catches literal camera shake and sensor glitches | Strong, since it only needs timestamps | Moderate |
 | **Camera-only, no telemetry** | No signal. Motion switches itself off and no `quality.sparc` is written | No signal today; the health picker only offers decodable channels, so camera channels are left out (see [Limits](#limits)) | Falls back to health metrics, and is weak without motion features |
+
+The motion picker offers any telemetry channel with a numeric field, which is
+broader than the set worth scoring. A point cloud or a log channel can carry
+varying numeric metadata and will be offered even though its "motion" means
+nothing. Pick the channels that actually hold kinematics.
 
 **Cross-task comparison caveat.** Isolation forest and kNN distance compare
 episodes to each other within the batch you scored. If that batch mixes many
@@ -360,6 +383,12 @@ probably bad.
 
 - **No programmatic playhead seek.** Clicking a row or point opens the episode
   and toasts the flagged timecode. You still scrub the timeline yourself.
+- **Motion needs at least 5 samples per window**, so a channel publishing
+  slower than about 2.5 Hz yields no motion windows at the default 2 s length
+  and contributes nothing. Nothing in the form tells you that's why the tab came
+  back empty. Raise **Window length** for slow channels.
+- **`clock_drift_ppm` needs two real clocks** and is usually unavailable,
+  because most writers set `publish_time` equal to `log_time`.
 - **`clipping_frac` and `saturation_frac` are heuristics**, not
   hardware-calibrated. They flag values pinned at a channel's own observed
   min/max, since nothing in an MCAP file exposes a real actuator or sensor

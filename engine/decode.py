@@ -23,6 +23,16 @@ from .discovery import SCALAR_SIDECAR, TELEMETRY
 
 # protobuf FieldDescriptor.cpp_type values that are numeric or boolean.
 _PROTOBUF_NUMERIC_CPP_TYPES = frozenset(range(1, 8))
+_PROTOBUF_MESSAGE_CPP_TYPE = 10
+
+# Submessage types that hold a clock rather than a measurement, skipped by
+# type name so no field-name matching is involved. See _iter_numeric_fields.
+_PROTOBUF_TIME_TYPES = frozenset({"google.protobuf.Timestamp", "google.protobuf.Duration"})
+_ROS_TIME_TYPES = frozenset({"Time", "Duration"})
+
+# Guard against a pathologically deep schema; real kinematics sit one or two
+# levels down (``Odometry.pose.position.x`` is the deepest common case).
+_MAX_NESTING_DEPTH = 4
 
 
 def decode_channel(filepath, channel):
@@ -80,12 +90,27 @@ def _first_json_fields(filepath, topic):
     return {}
 
 
+# MCAP files come from arbitrary producers, so a channel's schema can be
+# something the installed decoder refuses to build types for: a ROS 2 message
+# definition with a lowercase constant name, a schema referencing a package the
+# decoder can't resolve, a truncated definition. That is a property of the file
+# rather than a bug here, and it must not take down the episode -- one
+# unreadable channel out of twenty should cost that channel and nothing else.
+# Both structured decode paths below treat a decoder failure exactly as they
+# treat a channel with no numeric content: return nothing, and let callers skip
+# it. Anything decoded before a mid-stream failure is kept.
+_DECODER_FAILURE = Exception
+
+
 def _first_structured_fields(filepath, topic):
     """As `_first_json_fields`, for protobuf/ROS channels (needs the decoders)."""
     with open(filepath, "rb") as f:
         reader = make_reader(f, decoder_factories=_decoder_factories())
-        for _, _, _, decoded in reader.iter_decoded_messages(topics=[topic]):
-            return _walk_fields(decoded)
+        try:
+            for _, _, _, decoded in reader.iter_decoded_messages(topics=[topic]):
+                return _walk_fields(decoded)
+        except _DECODER_FAILURE:
+            return {}
     return {}
 
 
@@ -111,8 +136,11 @@ def _decode_structured_channel(filepath, topic):
     records = []
     with open(filepath, "rb") as f:
         reader = make_reader(f, decoder_factories=_decoder_factories())
-        for _, _, message, decoded in reader.iter_decoded_messages(topics=[topic]):
-            records.append((message.log_time, message.publish_time, _walk_fields(decoded)))
+        try:
+            for _, _, message, decoded in reader.iter_decoded_messages(topics=[topic]):
+                records.append((message.log_time, message.publish_time, _walk_fields(decoded)))
+        except _DECODER_FAILURE:
+            return records
     return records
 
 
@@ -161,26 +189,59 @@ def _walk_fields(message):
     return out
 
 
-def _iter_numeric_fields(message):
+def _iter_numeric_fields(message, depth=0):
     """Yields ``(field_name, [float, ...])`` for every numeric field on a decoded message.
 
     Supports both protobuf messages (via ``DESCRIPTOR.fields``) and the
     dynamically-generated ROS1/ROS2 message classes (via ``__slots__``).
-    """
-    if hasattr(message, "DESCRIPTOR"):
-        for field in message.DESCRIPTOR.fields:
-            if field.cpp_type not in _PROTOBUF_NUMERIC_CPP_TYPES:
-                continue
-            value = getattr(message, field.name)
-            yield field.name, [float(v) for v in value] if field.is_repeated else [float(value)]
-        return
 
+    Walks nested submessages, joining each level's field name with an
+    underscore, because standard schemas put the kinematics one or two levels
+    down rather than at the top: a ``foxglove.Odometry`` keeps its velocity in
+    a ``Vector3`` submessage and a ROS ``sensor_msgs/msg/Imu`` keeps its
+    angular rate in one. A top-level-only walk finds nothing at all on the
+    first and only the flat covariance arrays on the second, so the channel
+    that carries the actual motion looks empty while its metadata looks
+    scorable.
+
+    Two things are deliberately not walked. Repeated submessages are
+    variable-length, so they can't form the fixed-width vector series every
+    metric here needs. Timestamp and duration submessages are skipped by type
+    name: a clock is a monotonic ramp, so differentiating it manufactures a
+    smooth constant-velocity signal that has nothing to do with the robot.
+    """
+    if depth > _MAX_NESTING_DEPTH:
+        return
+    if hasattr(message, "DESCRIPTOR"):
+        yield from _iter_protobuf_fields(message, depth)
+    else:
+        yield from _iter_slot_fields(message, depth)
+
+
+def _iter_protobuf_fields(message, depth):
+    for field in message.DESCRIPTOR.fields:
+        value = getattr(message, field.name)
+        if field.cpp_type in _PROTOBUF_NUMERIC_CPP_TYPES:
+            yield field.name, [float(v) for v in value] if field.is_repeated else [float(value)]
+        elif (
+            field.cpp_type == _PROTOBUF_MESSAGE_CPP_TYPE
+            and not field.is_repeated
+            and field.message_type.full_name not in _PROTOBUF_TIME_TYPES
+        ):
+            for name, values in _iter_numeric_fields(value, depth + 1):
+                yield f"{field.name}_{name}", values
+
+
+def _iter_slot_fields(message, depth):
     for name in getattr(message, "__slots__", ()):
         value = getattr(message, name)
         if _is_number(value):
             yield name, [float(value)]
         elif isinstance(value, (list, tuple)) and value and all(_is_number(v) for v in value):
             yield name, [float(v) for v in value]
+        elif hasattr(value, "__slots__") and type(value).__name__ not in _ROS_TIME_TYPES:
+            for sub, values in _iter_numeric_fields(value, depth + 1):
+                yield f"{name}_{sub}", values
 
 
 def _is_number(value):

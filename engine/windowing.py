@@ -17,7 +17,9 @@ WINDOW_S = 2.0
 OVERLAP = 0.5
 
 _INDEXED_SUFFIX = re.compile(r"_\d+$")
-_AXIS_SUFFIX = re.compile(r"_(x|y|z|roll|pitch|yaw)$")
+# `w` is here so a quaternion groups as one 4-D orientation rather than
+# splitting its scalar component off into a group of its own.
+_AXIS_SUFFIX = re.compile(r"_(x|y|z|w|roll|pitch|yaw)$")
 
 
 @dataclass(frozen=True)

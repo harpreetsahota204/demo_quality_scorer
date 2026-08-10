@@ -71,7 +71,13 @@ MIN_WINDOW_SAMPLES = 5
 # z-scores instead of raw mixed-unit columns; a moving-speed idle reference;
 # gap-weighted dropout; MAD-based rate_cov; low-percentile desync; complete
 # windows only; per-second speed profiles.
-CONFIG_VERSION = 4
+# v5: a decode-generality pass. Nested submessages are walked, so schemas that
+# keep their kinematics one level down (foxglove.Odometry, ROS sensor_msgs) now
+# contribute fields at all; ROS 2 (`cdr`) channels are decodable; field groups
+# whose speed never varies are skipped instead of scored as constant columns;
+# clock_drift_ppm reports unavailable rather than 0.0 when there is only one
+# clock.
+CONFIG_VERSION = 5
 
 # Separator for channel-qualified metric keys ("sparc|/left-arm-state").
 # Never written to FiftyOne field names (write.py restructures); only used
@@ -270,6 +276,9 @@ def compute_raw_episode_metrics(
 
         for group, field_names in windowing.field_groups(records).items():
             full_vectors = windowing.group_vectors(records, field_names)
+            if not motion.has_speed_variation(full_vectors, group, fs):
+                continue
+
             idle_threshold = activity.episode_idle_threshold(full_vectors, group, fs, alpha=idle_alpha)
 
             for window in windowing.windows_for_group(records, group, field_names, win_s, overlap):

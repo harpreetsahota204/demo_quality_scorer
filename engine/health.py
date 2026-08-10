@@ -65,6 +65,15 @@ def clock_drift_ppm(records):
 
     Zero drift means the log/publish timebases stay in lockstep; a nonzero
     value indicates one clock runs fast/slow relative to the other.
+
+    Needs two genuinely distinct clocks, and returns NaN (unavailable) rather
+    than 0.0 when it doesn't have them. Many writers set ``publish_time`` equal
+    to ``log_time``, which makes every offset identically zero and the fitted
+    slope zero too. Reporting that as zero drift would claim a clean bill of
+    health for a clock nothing ever checked, and would feed a spurious
+    "perfectly typical" term into the composite score on every episode. A
+    constant *nonzero* offset is a real measurement of zero relative drift, so
+    that case still reports 0.0.
     """
     if len(records) < 3:
         return np.nan
@@ -73,7 +82,7 @@ def clock_drift_ppm(records):
     # timestamps would otherwise lose precision if cast to float64 first.
     log_times_ns = np.array([r[0] for r in records], dtype=np.int64)
     publish_times_ns = np.array([r[1] for r in records], dtype=np.int64)
-    if not np.any(publish_times_ns):
+    if not np.any(publish_times_ns) or not np.any(log_times_ns - publish_times_ns):
         return np.nan
 
     offsets_ns = (log_times_ns - publish_times_ns).astype(np.float64)

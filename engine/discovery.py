@@ -20,7 +20,11 @@ _VIDEO_SCHEMAS = {
     "sensor_msgs/msg/CompressedImage",
 }
 
-_STRUCTURED_ENCODINGS = {"protobuf", "ros1", "ros2"}
+# MCAP's well-known message encodings for schema-carrying messages. ROS 2
+# writes `cdr` (its wire format) rather than a "ros2" label, so omitting it
+# makes every ROS 2 recording read as an undecodable `other` channel; `ros2`
+# is kept for producers that use the label anyway.
+_STRUCTURED_ENCODINGS = {"protobuf", "ros1", "ros2", "cdr"}
 
 CAMERA = "camera"
 TELEMETRY = "telemetry"

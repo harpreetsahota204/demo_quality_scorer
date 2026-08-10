@@ -28,6 +28,10 @@ HIGHER_IS_WORSE = {
 # it and the trim math in jerk_rms depends on the same value.
 FILTER_ORDER = 4
 
+# Relative spread below which a speed profile counts as constant, i.e. as
+# carrying no motion at all. See has_speed_variation.
+SPEED_VARIATION_TOLERANCE = 1e-9
+
 
 def lowpass_filtfilt(signal, cutoff_hz, fs, order=FILTER_ORDER):
     """Zero-phase Butterworth low-pass filter, skipped gracefully when ill-defined.
@@ -76,6 +80,34 @@ def speed_profile(vectors, group, fs):
     if "vel" in group.lower() or "speed" in group.lower():
         return np.linalg.norm(vectors, axis=1)
     return np.linalg.norm(np.diff(vectors, axis=0), axis=1) * fs
+
+
+def has_speed_variation(vectors, group, fs, tolerance=SPEED_VARIATION_TOLERANCE):
+    """True if a field group's speed profile changes at all over the episode.
+
+    Decoding a channel generically surfaces every numeric field it carries,
+    and plenty of those hold constants: covariance blocks, point-cloud
+    dimensions and strides, camera intrinsics, static transforms. Each becomes
+    a field group that looks scorable and isn't. Scoring one contributes a
+    constant column to the corpus normalization fit and to the outlier feature
+    matrix, and lets a channel's own metadata compete with its real motion in
+    the worst-of rollup.
+
+    A constant speed profile is the exact, name-free test for that. It also
+    catches a monotonically increasing field (a sequence counter, a numeric
+    clock), whose speed is a nonzero constant, since neither carries motion
+    either. `tolerance` is relative to the profile's own magnitude, so this
+    doesn't depend on a channel's units.
+    """
+    if np.isnan(fs) or fs <= 0:
+        return False
+    speed = speed_profile(vectors, group, fs)
+    speed = speed[~np.isnan(speed)]
+    if len(speed) < 2:
+        return False
+    spread = float(np.max(speed) - np.min(speed))
+    magnitude = float(np.max(np.abs(speed)))
+    return spread > tolerance * max(magnitude, 1.0)
 
 
 def sparc(speed, fs, fc=10.0, amp_threshold=0.05, pad_level=4):
