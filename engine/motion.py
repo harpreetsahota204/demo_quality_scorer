@@ -32,6 +32,11 @@ FILTER_ORDER = 4
 # carrying no motion at all. See has_speed_variation.
 SPEED_VARIATION_TOLERANCE = 1e-9
 
+# Default low-pass cutoff for jerk_rms's pre-filter, in Hz. Named because the
+# operator form, the engine signature and the run config all need the same
+# number and must not drift apart.
+JERK_CUTOFF_HZ_DEFAULT = 10.0
+
 
 def lowpass_filtfilt(signal, cutoff_hz, fs, order=FILTER_ORDER):
     """Zero-phase Butterworth low-pass filter, skipped gracefully when ill-defined.
@@ -200,14 +205,13 @@ def ldlj(speed, fs):
     return float(-np.log(dimensionless_jerk))
 
 
-def jerk_rms(speed, fs, cutoff_hz=10.0):
+def jerk_rms(speed, fs, cutoff_hz=JERK_CUTOFF_HZ_DEFAULT):
     """RMS jerk of a zero-phase-filtered speed profile (lower = smoother).
 
     Differentiating a speed profile twice (to get jerk) amplifies noise by
     omega^2, so an unfiltered RMS jerk on a real sensor signal is mostly
-    noise, not signal. Low-pass filters first (`cutoff_hz` defaults to
-    SPARC's own `fc`), then trims the samples most affected by filtfilt's
-    edge padding before differentiating.
+    noise, not signal. Low-pass filters first, then trims the samples most
+    affected by filtfilt's edge padding before differentiating.
     """
     if len(speed) < 5 or fs <= 0:
         return np.nan
@@ -230,8 +234,7 @@ def psd_lf_hf(speed, fs, cutoff_hz=None):
     (arXiv:2605.01544), whose "PSD" is raw summed DFT power on 3D
     end-effector *position* (not a Welch density, not a ratio), ranked
     ascending. The name overlap is coincidental; the numbers are not
-    comparable to that paper's. Ours trades away the paper's exact
-    reproduction for being more variance-robust in production.
+    comparable to that paper's.
 
     Returned as a natural log, which makes it symmetric and unbounded in both
     directions. The bare ratio is bounded on its *bad* side -- it can only

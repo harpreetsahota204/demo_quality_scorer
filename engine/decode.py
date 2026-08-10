@@ -90,27 +90,32 @@ def _first_json_fields(filepath, topic):
     return {}
 
 
-# MCAP files come from arbitrary producers, so a channel's schema can be
-# something the installed decoder refuses to build types for: a ROS 2 message
-# definition with a lowercase constant name, a schema referencing a package the
-# decoder can't resolve, a truncated definition. That is a property of the file
-# rather than a bug here, and it must not take down the episode -- one
-# unreadable channel out of twenty should cost that channel and nothing else.
-# Both structured decode paths below treat a decoder failure exactly as they
-# treat a channel with no numeric content: return nothing, and let callers skip
-# it. Anything decoded before a mid-stream failure is kept.
-_DECODER_FAILURE = Exception
+def _iter_structured_messages(filepath, topic):
+    """Yields ``(message, decoded)`` for one protobuf/ROS channel, in log-time order.
+
+    Stops quietly if the installed decoder can't handle the channel. MCAP files
+    come from arbitrary producers, so a schema can be something the decoder
+    refuses to build types for: a ROS 2 message definition with a lowercase
+    constant name, a schema referencing a package it can't resolve, a truncated
+    definition. That is a property of the file rather than a bug here, and it
+    must not take down the episode -- one unreadable channel out of twenty
+    should cost that channel and nothing else. Callers see the same empty
+    result they'd get from a channel with no numeric content, and anything
+    decoded before a mid-stream failure is kept.
+    """
+    with open(filepath, "rb") as f:
+        reader = make_reader(f, decoder_factories=_decoder_factories())
+        try:
+            for _, _, message, decoded in reader.iter_decoded_messages(topics=[topic]):
+                yield message, decoded
+        except Exception:
+            return
 
 
 def _first_structured_fields(filepath, topic):
     """As `_first_json_fields`, for protobuf/ROS channels (needs the decoders)."""
-    with open(filepath, "rb") as f:
-        reader = make_reader(f, decoder_factories=_decoder_factories())
-        try:
-            for _, _, _, decoded in reader.iter_decoded_messages(topics=[topic]):
-                return _walk_fields(decoded)
-        except _DECODER_FAILURE:
-            return {}
+    for _, decoded in _iter_structured_messages(filepath, topic):
+        return _walk_fields(decoded)
     return {}
 
 
@@ -133,15 +138,10 @@ def _decode_json_channel(filepath, topic):
 
 
 def _decode_structured_channel(filepath, topic):
-    records = []
-    with open(filepath, "rb") as f:
-        reader = make_reader(f, decoder_factories=_decoder_factories())
-        try:
-            for _, _, message, decoded in reader.iter_decoded_messages(topics=[topic]):
-                records.append((message.log_time, message.publish_time, _walk_fields(decoded)))
-        except _DECODER_FAILURE:
-            return records
-    return records
+    return [
+        (message.log_time, message.publish_time, _walk_fields(decoded))
+        for message, decoded in _iter_structured_messages(filepath, topic)
+    ]
 
 
 def _decoder_factories():

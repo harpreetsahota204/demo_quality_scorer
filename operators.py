@@ -6,7 +6,7 @@ import fiftyone.core.tags as fota
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
 
-from .engine import activity, windowing
+from .engine import activity, motion, windowing
 from .engine.decode import has_numeric_signal
 from .engine.discovery import SCALAR_SIDECAR, TELEMETRY, discover_channels
 from .engine.score import (
@@ -80,6 +80,18 @@ HEALTH_METRIC_ROWS = (
 def _selected_metrics(cfg, rows):
     """The metric keys from ``rows`` whose checkboxes are on in a family's params."""
     return [key for key, _, _ in rows if cfg.get(f"metric_{key}", True)]
+
+
+def _setting(cfg, name, default):
+    """One numeric form value, falling back only when it is genuinely absent.
+
+    Testing for None rather than falsiness, because 0 is a meaningful value for
+    some of these knobs: an `overlap` of 0 means non-overlapping windows and an
+    `idle_alpha` of 0 means nothing counts as idle. Treating those as unset
+    would silently substitute the default for what the user asked for.
+    """
+    value = cfg.get(name)
+    return default if value is None else value
 
 
 def _add_metric_checkboxes(section, rows):
@@ -180,11 +192,10 @@ class ComputeEpisodeQuality(foo.Operator):
             inputs.view("empty_view", types.Warning(label="The current view has no samples."))
             return types.Property(inputs)
 
-        # Scans only the view's first sample, same as the as-built flat-list
-        # form this replaces -- discovery does not union channels across
-        # multiple episodes. Fine for a single MCAP producer/schema, which
-        # is the common case; noted here rather than adding new scan
-        # machinery in this change (out of scope).
+        # Scans only the view's first sample: discovery does not union
+        # channels across episodes. Fine for a view recorded by a single
+        # producer/schema, which is the common case, but a heterogeneous view
+        # will only offer the channels its first episode happens to carry.
         filepath = view.first().filepath
         disc = list(_discover_scorable(filepath))
         if not disc:
@@ -317,7 +328,7 @@ class ComputeEpisodeQuality(foo.Operator):
             if "jerk_rms" in motion_metrics:
                 section.float(
                     "jerk_cutoff_hz",
-                    default=10.0,
+                    default=motion.JERK_CUTOFF_HZ_DEFAULT,
                     label="Jerk pre-filter cutoff (Hz)",
                     description="Low-pass cutoff applied before differentiating for RMS jerk.",
                     min=0.1,
@@ -398,14 +409,14 @@ class ComputeEpisodeQuality(foo.Operator):
             "validation",
             types.Notice(
                 label=_build_validation_line(
-                    has_motion,
-                    motion_enabled,
-                    len(motion_sources),
-                    len(motion_metrics),
-                    health_enabled,
-                    len(health_channels),
-                    len(health_metrics),
-                    outliers_enabled,
+                    has_motion=has_motion,
+                    motion_enabled=motion_enabled,
+                    n_motion_channels=len(motion_sources),
+                    n_motion_metrics=len(motion_metrics),
+                    health_enabled=health_enabled,
+                    n_health_channels=len(health_channels),
+                    n_health_metrics=len(health_metrics),
+                    outliers_enabled=outliers_enabled,
                 )
             ),
         )
@@ -427,15 +438,14 @@ class ComputeEpisodeQuality(foo.Operator):
         health_cfg = ctx.params.get("health_cfg") or {}
         outliers_cfg = ctx.params.get("outliers_cfg") or {}
 
-        win_s = motion_cfg.get("win_s") or windowing.WINDOW_S
-        overlap = motion_cfg.get("overlap")
-        overlap = windowing.OVERLAP if overlap is None else overlap
+        win_s = _setting(motion_cfg, "win_s", windowing.WINDOW_S)
+        overlap = _setting(motion_cfg, "overlap", windowing.OVERLAP)
 
         motion_enabled = ctx.params.get("motion_enabled", False)
         motion_topics = (motion_cfg.get("motion_sources") or []) if motion_enabled else []
         motion_metrics = _selected_metrics(motion_cfg, MOTION_METRIC_ROWS)
-        idle_alpha = motion_cfg.get("idle_alpha") or activity.IDLE_ALPHA_DEFAULT
-        jerk_cutoff_hz = motion_cfg.get("jerk_cutoff_hz") or 10.0
+        idle_alpha = _setting(motion_cfg, "idle_alpha", activity.IDLE_ALPHA_DEFAULT)
+        jerk_cutoff_hz = _setting(motion_cfg, "jerk_cutoff_hz", motion.JERK_CUTOFF_HZ_DEFAULT)
 
         health_enabled = ctx.params.get("health_enabled", True)
         health_topics = set(health_cfg.get("health_channels") or []) if health_enabled else set()

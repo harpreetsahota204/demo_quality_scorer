@@ -173,7 +173,7 @@ def compute_raw_episode_metrics(
     win_s=windowing.WINDOW_S,
     overlap=windowing.OVERLAP,
     idle_alpha=activity.IDLE_ALPHA_DEFAULT,
-    jerk_cutoff_hz=10.0,
+    jerk_cutoff_hz=motion.JERK_CUTOFF_HZ_DEFAULT,
 ):
     """Computes one episode's raw (not-yet-normalized) quality metrics.
 
@@ -243,8 +243,9 @@ def compute_raw_episode_metrics(
                 _append_if_finite(health_values, "rate_cov", rate_cov)
 
         if "clock_drift_ppm" in health_metrics:
-            drift = health.clock_drift_ppm(records)
-            _append_if_finite(health_values, "clock_drift_ppm", abs(drift) if not np.isnan(drift) else drift)
+            # Magnitude only: a clock running fast is no healthier than one
+            # running slow. NaN (unmeasurable) survives abs() and is dropped.
+            _append_if_finite(health_values, "clock_drift_ppm", abs(health.clock_drift_ppm(records)))
 
         if "clipping_frac" in health_metrics:
             # Per field group rather than per channel: a channel can pin one
@@ -539,7 +540,7 @@ def _finalize_intervals(window_records, norm_stats):
         if sev is not None:
             flagged.append((record, sev))
 
-    flagged.sort(key=lambda item: _series_key(item) + (item[0].start_s,))
+    flagged.sort(key=lambda item: (*_series_key(item), item[0].start_s))
 
     intervals = []
     for (channel, group, metric), group_items in itertools.groupby(flagged, key=_series_key):

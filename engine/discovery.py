@@ -10,8 +10,7 @@ from dataclasses import dataclass
 from mcap.reader import make_reader
 
 # Well-known video schema names across common MCAP producers. Topic strings
-# are not used for this check: a topic can be misleadingly named (see the
-# PRD's "check schema names" guidance).
+# are not used for this check, because a topic can be misleadingly named.
 _VIDEO_SCHEMAS = {
     "foxglove.CompressedVideo",
     "foxglove.RawImage",
@@ -84,7 +83,7 @@ def _classify(message_encoding, schema):
     Order matters: cameras are protobuf/ROS-encoded too, so they must be
     ruled out by schema before encoding is consulted, or every image channel
     would be handed to the scalar decoder. `OTHER` is the deliberate
-    catch-all for encodings this plugin can't decode (cdr, cbor, custom) --
+    catch-all for encodings with no decoder here (cbor, flatbuffer, custom) --
     they stay visible in discovery, just not scorable.
     """
     schema_name = schema.name if schema else None

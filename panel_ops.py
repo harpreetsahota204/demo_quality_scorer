@@ -31,9 +31,9 @@ class GetQualityPanelData(foo.Operator):
 class OpenQualityEpisode(foo.Operator):
     """Deep-links into one episode's viewer, with a worst-flag toast.
 
-    The toast is the PRD's own workaround for FiftyOne having no
-    programmatic playhead-seek yet -- we can open the episode but not
-    scrub it, so we tell the user where to scrub.
+    The toast is a workaround for FiftyOne having no programmatic
+    playhead-seek yet -- we can open the episode but not scrub it, so we tell
+    the user where to scrub.
     """
 
     @property

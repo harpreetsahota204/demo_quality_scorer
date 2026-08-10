@@ -13,6 +13,16 @@ const TABS = [
   { id: "outliers", label: "Outliers" },
 ];
 
+// Which tabs the last run actually produced data for. A family can be
+// deselected at scoring time, and its tab then has nothing to draw.
+function scoredByTab(data: PanelData): Record<string, boolean> {
+  return {
+    motion: data.motion_scored,
+    health: data.health_scored,
+    outliers: data.outliers_scored,
+  };
+}
+
 export default function QualityPanel() {
   const dataOp = useOperatorExecutor(`${PLUGIN}/get_quality_panel_data`);
   const openOp = useOperatorExecutor(`${PLUGIN}/open_quality_episode`);
@@ -42,12 +52,8 @@ export default function QualityPanel() {
     // Default to the first tab the last run actually scored, but never
     // fight the user once they've picked a tab themselves.
     if (!tabPicked.current && next.scored) {
-      const scoredTabs: Record<string, boolean> = {
-        motion: next.motion_scored,
-        health: next.health_scored,
-        outliers: next.outliers_scored,
-      };
-      setActiveTab(TABS.find((t) => scoredTabs[t.id])?.id ?? "motion");
+      const scored = scoredByTab(next);
+      setActiveTab(TABS.find((t) => scored[t.id])?.id ?? "motion");
     }
   }, [dataOp.result]);
 
@@ -93,11 +99,7 @@ export default function QualityPanel() {
     );
   }
 
-  const scoredByTab: Record<string, boolean> = {
-    motion: data.motion_scored,
-    health: data.health_scored,
-    outliers: data.outliers_scored,
-  };
+  const scored = scoredByTab(data);
   const familyLabel: Record<string, string> = {
     motion: "Motion",
     health: "Sensor health",
@@ -135,7 +137,7 @@ export default function QualityPanel() {
       </div>
 
       <div style={{ flex: 1, overflow: "auto", padding: 16 }}>
-        {scoredByTab[activeTab] ? (
+        {scored[activeTab] ? (
           activeTab === "motion" ? (
             <MotionTab data={data} onOpen={openEpisode} onShow={showEpisodes} />
           ) : activeTab === "health" ? (

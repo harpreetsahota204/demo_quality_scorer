@@ -18,13 +18,20 @@ import { HistogramBar, MetricHistogramData, QualityRow } from "./types";
 const axisStyle = { fontSize: 10, fill: theme.textDim };
 const axisLabelStyle = { fill: theme.textDim, fontSize: 11 };
 
+// Drops the padding zeros toPrecision adds ("1.50" -> "1.5"), only ever after
+// a decimal point: the trailing zeros of an integer like "150" are its value,
+// not padding, and stripping them renders it as "15".
+function trimTrailingZeros(text: string): string {
+  return text.includes(".") ? text.replace(/\.?0+$/, "") : text;
+}
+
 // Compact tick text for large magnitudes ("7.5M", "12k") so y-axis labels
 // don't collide with wide tick numbers
 function fmtTick(v: number): string {
   const abs = Math.abs(v);
-  if (abs >= 1e6) return `${(v / 1e6).toPrecision(3).replace(/\.?0+$/, "")}M`;
-  if (abs >= 1e3) return `${(v / 1e3).toPrecision(3).replace(/\.?0+$/, "")}k`;
-  return Number(v).toPrecision(3).replace(/\.?0+$/, "");
+  if (abs >= 1e6) return `${trimTrailingZeros((v / 1e6).toPrecision(3))}M`;
+  if (abs >= 1e3) return `${trimTrailingZeros((v / 1e3).toPrecision(3))}k`;
+  return trimTrailingZeros(Number(v).toPrecision(3));
 }
 const tooltipStyle: React.CSSProperties = {
   background: theme.headerBg,

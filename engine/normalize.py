@@ -196,31 +196,22 @@ def severity(z_score):
     return None
 
 
-def verdict(values_by_metric, stats_by_metric, higher_is_worse_fn):
-    """Combines several metrics into one pass/warn/fail verdict.
+def verdict_with_reason(values_by_metric, stats_by_metric, higher_is_worse_fn):
+    """Combines several metrics into one pass/warn/fail verdict, and names the cause.
 
     "fail" if any metric's z-score is fail-severity, else "warn" if any is
     warn-severity, else "pass". Metrics missing from ``stats_by_metric`` (or
     with a ``None``/NaN value) are skipped.
+
+    Because :func:`severity` is monotonic in z, the highest-z metric is
+    always one at the verdict's own severity level, so blaming it is
+    consistent with the "any fail -> fail, else any warn -> warn" rule.
 
     Args:
         values_by_metric: a dict of metric name -> raw value
         stats_by_metric: a dict of metric name -> fitted ``(median, scale)``
             stats, as returned by :func:`fit`
         higher_is_worse_fn: a callable mapping a metric name to its polarity
-
-    Returns:
-        ``"pass"``, ``"warn"``, or ``"fail"``
-    """
-    return verdict_with_reason(values_by_metric, stats_by_metric, higher_is_worse_fn)[0]
-
-
-def verdict_with_reason(values_by_metric, stats_by_metric, higher_is_worse_fn):
-    """Like :func:`verdict`, but also names the metric that drove the verdict.
-
-    Because :func:`severity` is monotonic in z, the highest-z metric is
-    always one at the verdict's own severity level, so blaming it is
-    consistent with the "any fail -> fail, else any warn -> warn" rule.
 
     Returns:
         a tuple ``(verdict, metric_name)``; ``metric_name`` is None when

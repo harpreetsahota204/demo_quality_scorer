@@ -67,13 +67,15 @@ def clock_drift_ppm(records):
     value indicates one clock runs fast/slow relative to the other.
 
     Needs two genuinely distinct clocks, and returns NaN (unavailable) rather
-    than 0.0 when it doesn't have them. Many writers set ``publish_time`` equal
-    to ``log_time``, which makes every offset identically zero and the fitted
-    slope zero too. Reporting that as zero drift would claim a clean bill of
-    health for a clock nothing ever checked, and would feed a spurious
-    "perfectly typical" term into the composite score on every episode. A
-    constant *nonzero* offset is a real measurement of zero relative drift, so
-    that case still reports 0.0.
+    than 0.0 when it doesn't have them, in either of the two ways that happens.
+    A writer can omit ``publish_time`` altogether (it reads as 0, and the
+    "offset" would then be the whole epoch timestamp), or it can set
+    ``publish_time`` equal to ``log_time``, which makes every offset
+    identically zero and the fitted slope zero too. Reporting the second as
+    zero drift would claim a clean bill of health for a clock nothing ever
+    checked, and would feed a spurious "perfectly typical" term into the
+    composite score on every episode. A constant *nonzero* offset is a real
+    measurement of zero relative drift, so that case still reports 0.0.
     """
     if len(records) < 3:
         return np.nan

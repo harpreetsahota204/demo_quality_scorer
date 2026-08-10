@@ -55,8 +55,9 @@ const EXPLAINERS: Record<string, string> = {
     "cleaner low-frequency-dominated motion; lower means more high-frequency energy.",
   ranking:
     "Episodes ranked worst-first. Overall is a weighted average of each metric's robust " +
-    "z-score: how many robust standard deviations (median/MAD) worse than the dataset median " +
-    "the episode is, so scores are comparable across metrics with different units. When " +
+    "z-score: how many robust standard deviations worse than the dataset median the episode " +
+    "is, measured with a spread fit from the metric's own bad tail, so scores are comparable " +
+    "across metrics with different units and skew. When " +
     "several channels are scored, each metric shows its worst channel's value (worst-of, not " +
     "averaged \u2014 a smooth arm never masks a jerky one); hover a value for the per-channel " +
     "breakdown. Isolating a channel in the legend re-ranks the table by that channel's " +
@@ -97,6 +98,9 @@ function metricCell(row: QualityRow, metric: MotionMetric): React.ReactNode {
   return <span title={breakdown}>{fmt(row[metric])}</span>;
 }
 
+// Thresholds are deliberately lower than the engine's per-metric warn/fail
+// z-scores: this colors a weighted *average* of z-scores, which an episode
+// reaches only by being broadly bad rather than by failing one metric.
 function scoreColor(score: number | null): string {
   if (score === null) return theme.text;
   if (score >= 2) return theme.fail;

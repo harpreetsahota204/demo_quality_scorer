@@ -3,7 +3,7 @@ import { theme } from "./theme";
 
 const TIP_WIDTH = 280;
 
-export function InfoTip(props: { text: string }) {
+function InfoTip(props: { text: string }) {
   // position:fixed + viewport clamping so the tooltip never clips against
   // the panel's own scroll container or the window edge
   const [pos, setPos] = React.useState<{ top?: number; bottom?: number; left: number } | null>(null);
@@ -173,8 +173,8 @@ export function Button(props: {
         opacity: props.disabled ? 0.5 : 1,
         transition: "filter 120ms",
       }}
-      onMouseEnter={(e) => ((e.target as HTMLElement).style.filter = "brightness(1.15)")}
-      onMouseLeave={(e) => ((e.target as HTMLElement).style.filter = "none")}
+      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.filter = "brightness(1.15)")}
+      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.filter = "none")}
     >
       {props.label}
     </button>
