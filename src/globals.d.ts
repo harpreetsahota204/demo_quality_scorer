@@ -9,8 +9,6 @@ declare module "@fiftyone/operators" {
   export interface OperatorExecutor {
     execute(params: Record<string, unknown>): void;
     result?: Record<string, unknown> | null;
-    error?: unknown;
-    isLoading?: boolean;
   }
   export function useOperatorExecutor(uri: string): OperatorExecutor;
 }
@@ -19,5 +17,4 @@ declare module "@fiftyone/state" {
   import type { RecoilValueReadOnly } from "recoil";
   export const view: RecoilValueReadOnly<unknown[]>;
   export const selectedSamples: RecoilValueReadOnly<Set<string>>;
-  export const dataset: RecoilValueReadOnly<unknown>;
 }

@@ -55,22 +55,24 @@ for watch mode) and hard-refresh the browser.
    current view changes, so filtering the grid re-ranks the panel to match.
 
 The form has one tab per metric family. Each tab holds that family's on/off
-switch, its per-metric checkboxes, and a channel picker. Your selections
+switch, its per-metric checkboxes, and its signal or channel picker. Your selections
 persist when you switch tabs, and the advisory line above **Run** always
 reflects all three families.
 
 **Motion smoothness.** Enabled when the first sample has at least one
 telemetry channel carrying a numeric signal a speed profile can be derived
 from. If none does (a camera-only episode, for example), the family switches
-itself off and says why. A channel is only excluded on that basis when its
-messages actually decoded to no numeric fields; if the server has no decoder
-installed for a channel's encoding at all (say, `mcap-protobuf-support`
-missing on a protobuf recording), the channel stays selectable and the form
-shows a warning naming the package to install instead of deciding for you.
-Pick which channels carry motion; the dropdown drops each topic you add so
-you can't add one twice, which makes selecting both arms of a bimanual rig
-straightforward. Each channel is scored on its own and the
-worst channel per metric drives the episode's score. The four metric
+itself off and says why. A channel is excluded when its messages decode to no
+numeric fields. If the server lacks the decoder for an encoding (for example,
+`mcap-protobuf-support` for protobuf), affected channels cannot expose signal
+choices and the form names the package to install.
+Pick exact numeric signals from two inputs: **Position signals** are
+differentiated once to obtain speed, while **Velocity signals** are used
+directly and are preferred when available. Options are field-group granular,
+such as `/odom -> pose_position` and `/odom -> twist_linear`, so one mixed
+message can contribute both without treating covariance or orientation as
+motion. Each signal is scored on its own and the worst signal per metric
+drives the episode's score. The four metric
 checkboxes (SPARC, LDLJ, Jerk RMS, PSD ratio) are all on by default and carry
 short validity notes: SPARC is the most validated of the four and the least
 affected by sensor noise, while LDLJ and jerk RMS are noise-sensitive, so
@@ -82,7 +84,7 @@ reads full-episode timestamps, outliers read episode scalars):
 
 | Setting | Default | What it does |
 |---|---|---|
-| Window length | `2.0` s | Shorter windows localize flags more precisely and get noisier. Minimum 0.5 s |
+| Window length | **Auto** | Scans every selected signal in the current view, targets 100 samples with a 2 s floor, and stores the resolved value. Manual override available |
 | Window overlap | `0.5` | Fraction of overlap between consecutive windows, up to 0.9 |
 | Idle threshold | `0.05` | Multiplier on each episode's own moving speed, below which a sample counts as idle |
 | Jerk pre-filter cutoff | `10.0` Hz | Low-pass cutoff applied before differentiating for jerk RMS. Shown only while Jerk RMS is checked |
@@ -93,9 +95,9 @@ desync). Everything in this family comes from message timestamps and raw
 values, so it needs no motion channel and works identically on any channel
 kind the plugin can decode.
 
-**Outliers.** On by default. The models consume per-channel motion features,
-so you can restrict which channels' features reach them; leave the picker
-empty to use every selected motion channel. Health features are episode-wide
+**Outliers.** On by default. The models consume per-signal motion features,
+so you can restrict which signals' features reach them; leave the picker
+empty to use every selected motion signal. Health features are episode-wide
 and always contribute. With Motion off, the picker is replaced by a notice
 that the models will run on health features alone.
 
@@ -122,27 +124,27 @@ Four histograms and a worst-first ranking table:
 
 Each chart carries an "i" icon with a plain-language explainer, an expand
 button that swaps the 2x2 grid for one full-width plot, a dashed line at the
-warn threshold in that channel's own units, and an arrow showing which
+warn threshold in that signal's own units, and an arrow showing which
 direction is smoother. A metric you didn't compute shows "Not computed in the
 last run" instead of an empty plot.
 
 Ways to drive it:
 
 - **Click a histogram bar** to filter the samples panel to the episodes in
-  that bin on that channel. A toast confirms what's showing; clear the view
+  that bin on that signal. A toast confirms what's showing; clear the view
   bar to reset. The panel re-ranks to the current view, so the histograms then
   re-bin to the filtered subset.
-- **Click a channel chip** in the legend (shown when more than one channel was
-  scored) to isolate that channel across all four plots. The ranking table
-  follows: its values switch to that channel's own, the Overall column becomes
-  **Motion score**, and rows re-rank by that channel's motion-only score.
+- **Click a signal chip** in the legend (shown when more than one signal was
+  scored) to isolate that signal across all four plots. The ranking table
+  follows: its values switch to that signal's own, the Overall column becomes
+  **Motion score**, and rows re-rank by that signal's motion-only score.
   Click the chip again to show everything.
 - **Click a table row** to open that episode in the multimodal viewer, with a
   toast naming the timecode of its worst flagged interval. Metric cells show
-  the worst channel's value; hover one for the per-channel breakdown.
+  the worst signal's value; hover one for the per-signal breakdown.
 
-With several channels scored, each top-level field below holds the worst
-channel's value.
+With several signals scored, each top-level field below holds the worst
+signal's value.
 
 | Field | What it measures | How to read it |
 |---|---|---|
@@ -150,12 +152,12 @@ channel's value.
 | `ldlj` | Log dimensionless jerk of the speed profile | Closer to 0 is smoother. Very negative means rough motion |
 | `jerk_rms` | RMS jerk of the speed profile, low-pass filtered before differentiating | Lower is smoother. High values mean abrupt corrections, kickback, or actuator trouble. Weighted 0.3x in `overall_score` because it covaries with the other three |
 | `psd_lf_hf` | Log ratio of low- to high-frequency power (Welch PSD) of the speed profile | Higher is smoother, meaning energy sits in slow deliberate movement. Low values mean high-frequency noise, tremor, or vibration |
-| `sparc_worst`, `ldlj_worst`, `jerk_rms_worst`, `psd_lf_hf_worst` | The episode's single worst window for that metric, where the metric itself is the median over windows | Sidebar or `dataset.values()` only, not in the table. The median says what the episode was typically like; the worst window catches one bad stretch the median washes out |
+| `sparc_worst`, `ldlj_worst`, `jerk_rms_worst`, `psd_lf_hf_worst` | The episode's robust bad-tail window value (p5 or p95 by polarity), where the metric itself is the median over windows | Sidebar or `dataset.values()` only. The tail catches a bad stretch without letting one numerical spike define the episode |
 | `idle_frac` | Fraction of windows below the idle-speed threshold | Not scored into `overall_score`. High means the episode was mostly stationary, which can be a legitimate pause as easily as a stall |
 | `saturation_frac` | Fraction of samples pinned at their own observed min/max | Not scored into `overall_score`. A heuristic; see [Limits](#limits) |
-| `motion_by_channel` | One embedded doc per scored channel, holding `channel` plus every metric above | Raw values in each channel's own units. This is what the multi-series histograms and hover breakdowns read |
-| `motion_worst_channel` | Which channel drove each top-level value, e.g. `{sparc: "/right-arm-state"}` | Tells you which side to watch first |
-| `overall_score` | Weighted mean of every enabled metric's z-score, oriented so higher is always worse | The sort key. `0` is typical for this batch, `+2` and up is genuinely unusual, and large negative scores are your cleanest episodes |
+| `motion_by_signal` | One embedded doc per selected signal, holding `signal`, `channel`, `group`, `kind`, and every metric above | Raw values in each signal's own units |
+| `motion_worst_signal` | Which signal drove each top-level value | Identifies the exact channel and field group to inspect |
+| `overall_score` | Weighted mean of enabled motion/health z-scores, oriented so higher is worse | The bad-quality sort key. `0` is typical for this batch; outlier-model scores are deliberately separate |
 | `n_flags` | How many metrics cleared the warn threshold | Higher means more independent signals agree something is off |
 
 `psd_lf_hf` is this plugin's own Welch band-ratio metric on the speed profile.
@@ -186,11 +188,10 @@ the episode.
 | `health.rate_cov` | MAD-based coefficient of variation of inter-arrival times | Near 0 is metronomic. Higher means jittery timing, often a loaded compute box or lossy transport |
 | `health.clipping_frac` | Fraction of samples pinned at their own observed min/max, over the dimensions where that means anything | Higher means more values sitting at what looks like a sensor or actuator limit. A heuristic; see [Limits](#limits) |
 
-Each metric is reduced to one episode-wide number, the median across whatever
-contributed to it (channels, field groups, or channel pairs). Desync is the
-exception, since it is a property of a channel pair rather than a channel: the
-episode reports its worst pair, because a single badly skewed pair is enough to
-misalign the data.
+Each metric is reduced to the worst value across whatever contributed to it
+(channels, field groups, or channel pairs). Sensor health is triage: one
+dropping channel or clipped field group is enough to make the episode worth
+reviewing.
 
 A verdict is **fail** if any health metric hits z >= 3, **warn** if any hits
 z >= 2 without failing, otherwise **pass**. Verdicts need one completed scoring
@@ -214,9 +215,10 @@ Both models are fit on the batch's oriented z-scores rather than raw values,
 so a `jerk_rms` in the thousands can't drown out a `dropout` in `[0, 1]` in the
 Euclidean distance. The `_worst` tail columns are held out of the feature
 matrix, since each is a percentile of the same per-window distribution its
-median twin already summarizes. Both scores are weighted 0.5x in
-`overall_score`, because they are functions of every other metric already in
-the sum.
+median twin already summarizes. Outlier scores do **not** enter
+`overall_score` or `n_flags`: unusual does not mean bad, and an exceptionally
+clean episode can be an outlier. They retain their continuous ranking and
+`is_outlier` flag on this tab.
 
 Both need a real corpus to fit against. Fewer than two episodes returns NaN,
 and a handful of episodes produces noisy, low-confidence scores.
@@ -228,17 +230,22 @@ into a ranking over mixed tasks.
 
 ## How a score is computed
 
-**Windows.** Motion metrics are computed on 2-second windows at 50% overlap,
-on each channel's own timestamps, and windows need at least 5 samples to be
-scored. Every window spans the full window length: several of these metrics
+**Windows.** Auto windowing inspects every selected signal in the current view,
+then resolves one run-wide length that targets 100 samples at the low end of
+the observed rate distribution, with a 2-second minimum. Motion signals are
+resampled onto a uniform time grid before differentiation or spectral
+analysis; dropout-sized gaps remain invalid rather than being interpolated
+through. Windows overlap by 50% and need at least 5 samples to be scored.
+Every window spans the full resolved length: several of these metrics
 are duration-dependent (LDLJ's dimensionless jerk scales as roughly duration
 to the fourth), so a short trailing window is not comparable to the full ones
 it would be normalized against. An episode summarizes its windows twice, as a
 median and as a worst window.
 
-**Per-channel normalization.** Every metric is z-scored against the batch's
-own distribution for that exact (metric, channel) pair, never pooled across
-channels, because a gripper's units and a shoulder joint's aren't comparable.
+**Per-signal normalization.** Every metric is z-scored against the batch's
+own distribution for that exact (metric, selected signal),
+never pooled across signals, because meters, radians, and joint units aren't
+comparable.
 Episode-level and window-level values are also fit separately: per-window
 values spread out far more than medians-over-windows, and z-scoring one
 against the other's stats would flag almost every above-average window.
@@ -258,7 +265,7 @@ threshold. Being in the tail at all earns a glance, and being further out earns
 proportionally more. Z-scores are clipped at +/-10 as a backstop for a corpus
 with no variation whatsoever.
 
-**Worst-of across channels.** Per-channel z-scores are combined by taking the
+**Worst-of across signals.** Per-signal z-scores are combined by taking the
 worst: the highest z per metric drives the episode's top-level value,
 `overall_score`, and `n_flags`. RINSE
 ([arXiv:2604.23000](https://arxiv.org/abs/2604.23000)) averages smoothness
@@ -268,14 +275,15 @@ Filtering asks how good an episode is as training signal overall. Triage asks
 whether anything here deserves a human's attention, and a jerky right arm
 averaged against a smooth left arm looks fine. Movement science reports
 smoothness per limb and defines no standard cross-limb aggregate, so
-per-channel scoring with an explicit rollup is the honest middle ground. Every
-per-channel value stays on the sample in `quality.motion_by_channel` and in the
+per-signal scoring with an explicit rollup is the honest middle ground. Every
+per-signal value stays on the sample in `quality.motion_by_signal` and in the
 panel's hover breakdowns, so the rollup hides nothing.
 
 **Weights.** `overall_score` is a weighted mean over the metrics that were
 actually computed. Disabling a family removes its metrics and renormalizes the
 remaining weights rather than diluting the average with zeros. `jerk_rms` is
-weighted 0.3x and the two outlier scores 0.5x; everything else is 1.0.
+weighted 0.3x; every other included metric is 1.0. Outlier scores are separate
+review-priority evidence and are excluded.
 `idle_frac` and `saturation_frac` are reported for context and are not scored,
 because neither is inherently bad at any level.
 
@@ -316,7 +324,7 @@ Re-running over a smaller view leaves every other sample's tags alone.
 
 Expect many short spans on a long, dynamic episode. Jerk RMS has bursts of
 roughness around every grasp, release, and sharp turn, and there is one
-independent flag stream per (channel, field group, metric). Four channels with
+independent flag stream per (selected signal, metric). Four channels with
 four field groups each, scored on four metrics, is 64 streams, and each one
 contributes its own worst few percent of windows. On `Voxel51/ABC-130k` that
 works out to a median of about 60 flagged spans on an 87-second episode. What
@@ -348,13 +356,12 @@ walking each message's own descriptors, including nested submessages, so a
 `foxglove.Odometry`'s velocity and a ROS `sensor_msgs/msg/Imu`'s angular rate
 are picked up without naming either.
 
-Two things are skipped on purpose. Timestamp and duration submessages are
-excluded by type, because a clock is a monotonic ramp and differentiating it
-manufactures a smooth constant-velocity signal that says nothing about the
-robot. Field groups whose speed never varies across the episode are skipped
-too, which covers covariance blocks, point-cloud dimensions and strides, camera
-intrinsics, and static transforms. Those channels still appear in the pickers;
-they just contribute nothing if you select one.
+Timestamp and duration submessages are skipped by type because a clock is a
+monotonic ramp and differentiating it manufactures a smooth constant-velocity
+signal that says nothing about the robot. Other numeric field groups remain
+available for explicit selection; choose actual Position or Velocity signals
+and leave covariance, dimensions, strides, intrinsics, and static metadata
+unselected.
 
 A channel whose schema the installed decoder can't build types for (a ROS 2
 definition with a lowercase constant, a schema referencing an unresolvable
@@ -390,10 +397,11 @@ probably bad.
 
 - **No programmatic playhead seek.** Clicking a row or point opens the episode
   and toasts the flagged timecode. You still scrub the timeline yourself.
-- **Motion needs at least 5 samples per window**, so a channel publishing
-  slower than about 2.5 Hz yields no motion windows at the default 2 s length
-  and contributes nothing. Nothing in the form tells you that's why the tab came
-  back empty. Raise **Window length** for slow channels.
+- **Motion needs complete windows.** Auto lengthens windows for slow selected
+  signals, but a signal stream shorter than the resolved run-wide window still
+  contributes no motion score. The run config records the resolved length and
+  the fraction of streams that were too short; use Manual when localization
+  matters more than the 100-sample target.
 - **`clock_drift_ppm` needs two real clocks** and is usually unavailable,
   because most writers set `publish_time` equal to `log_time`.
 - **`clipping_frac` and `saturation_frac` are heuristics**, not
@@ -421,10 +429,11 @@ probably bad.
   timestamps and would work fine on a camera channel, but the decode path
   doesn't support camera channels yet, so they are left out of the picker
   rather than offered and silently ignored.
-- **Outlier feature selection is channel-level only.** You can choose which
-  channels feed the models, not which individual metrics.
-- **Remote and cloud `.mcap` files** are read with a plain local `open()`.
-  Byte-range reads over cloud storage are not implemented.
+- **Outlier feature selection is signal-level only.** You can choose which
+  selected signals feed the models, not which individual metrics.
+- **Cloud `.mcap` files are downloaded through `sample.local_path`** before
+  scoring. This uses the Enterprise media cache and intentionally downloads
+  the whole seekable object; byte-range streaming is not used.
 - **Temporal tags are written through `fiftyone.core.tags`**, an internal,
   undocumented API rather than the public SDK. It works in the version this
   plugin was built against and carries no stability guarantee.

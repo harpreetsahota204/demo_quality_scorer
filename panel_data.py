@@ -14,17 +14,12 @@ from .engine.score import (
     HEALTH_METRIC_NAMES as HEALTH_METRICS,
     METRIC_WEIGHTS,
     MOTION_METRIC_NAMES as MOTION_METRICS,
-    channel_key,
     higher_is_worse,
+    signal_metric_key,
 )
 from .operators import RUN_KEY
 
 HISTOGRAM_BINS = 20
-
-# Pseudo-channel used for scores written before per-channel motion metrics
-# existed (config_version < 3): those samples only carry top-level values.
-LEGACY_CHANNEL = "all"
-
 
 def build_panel_data(dataset, view):
     """Returns the full JSON-serializable payload for one panel refresh."""
@@ -44,7 +39,7 @@ def build_panel_data(dataset, view):
         health = getattr(q, "health", None)  # absent when family disabled
         has_health = has_health or health is not None
         verdict, reason = _health_verdict(health, episode_stats)
-        by_channel = _motion_by_channel(q)
+        by_signal = _motion_by_signal(q)
         rows.append(
             {
                 "id": sample.id,
@@ -52,9 +47,9 @@ def build_panel_data(dataset, view):
                 "overall_score": _num(q.overall_score),
                 "n_flags": q.n_flags,
                 **{name: _num(getattr(q, name, None)) for name in MOTION_METRICS},
-                "by_channel": by_channel,
-                "channel_scores": _channel_scores(by_channel, episode_stats),
-                "worst_channel": _motion_worst_channel(q),
+                "by_signal": by_signal,
+                "signal_scores": _signal_scores(by_signal, episode_stats),
+                "worst_signal": _motion_worst_signal(q),
                 "iforest_score": _num(getattr(q, "iforest_score", None)),
                 "knn_dist": _num(getattr(q, "knn_dist", None)),
                 "is_outlier": bool(q.is_outlier),
@@ -66,25 +61,24 @@ def build_panel_data(dataset, view):
     # reviewer reads down from the top and stops when episodes look fine.
     rows.sort(key=lambda r: -(r["overall_score"] or 0.0))
 
-    channels = sorted({channel for r in rows for channel in r["by_channel"]})
+    signals = sorted({signal for r in rows for signal in r["by_signal"]})
 
-    # Per-(metric, channel) warn thresholds, in each channel's own units.
-    # Falls back to legacy plain-key stats for pre-v3 runs.
+    # Per-(metric, signal) warn thresholds, in each signal's own units.
     warn_thresholds = {}
     if episode_stats:
         for metric in MOTION_METRICS:
-            per_channel = {}
-            for channel in channels:
-                key = metric if channel == LEGACY_CHANNEL else channel_key(metric, channel)
+            per_signal = {}
+            for signal in signals:
+                key = signal_metric_key(metric, signal)
                 stats = episode_stats.get(key)
                 if stats:
-                    per_channel[channel] = normalize.raw_value_at_z(
+                    per_signal[signal] = normalize.raw_value_at_z(
                         normalize.WARN_Z, stats, higher_is_worse(metric)
                     )
-            if per_channel:
-                warn_thresholds[metric] = per_channel
+            if per_signal:
+                warn_thresholds[metric] = per_signal
 
-    histograms = {metric: _histogram(rows, channels, metric) for metric in MOTION_METRICS}
+    histograms = {metric: _histogram(rows, signals, metric) for metric in MOTION_METRICS}
 
     verdict_counts = {"pass": 0, "warn": 0, "fail": 0, "unknown": 0}
     for r in rows:
@@ -93,9 +87,11 @@ def build_panel_data(dataset, view):
     return {
         "scored": True,
         "rows": rows,
-        "channels": channels,
+        "signals": signals,
         "histograms": histograms,
         "warn_thresholds": warn_thresholds,
+        "warn_z": normalize.WARN_Z,
+        "fail_z": normalize.FAIL_Z,
         "verdict_counts": verdict_counts,
         "smoother_direction": {m: "left" if higher_is_worse(m) else "right" for m in MOTION_METRICS},
         "motion_scored": any(r[m] is not None for r in rows for m in MOTION_METRICS),
@@ -172,44 +168,33 @@ def _num(value):
     return float(value) if value is not None else None
 
 
-def _motion_by_channel(quality_doc):
-    """``{channel: {metric: value}}`` from a sample's quality doc.
-
-    Pre-v3 scores have no ``motion_by_channel`` list; their top-level values
-    are surfaced under the :data:`LEGACY_CHANNEL` pseudo-channel so the
-    panel renders one series either way.
-    """
-    docs = getattr(quality_doc, "motion_by_channel", None)
-    if docs:
-        return {
-            doc.channel: {m: _num(getattr(doc, m, None)) for m in MOTION_METRICS}
-            for doc in docs
-        }
-
-    legacy = {m: _num(getattr(quality_doc, m, None)) for m in MOTION_METRICS}
-    if any(v is not None for v in legacy.values()):
-        return {LEGACY_CHANNEL: legacy}
-    return {}
+def _motion_by_signal(quality_doc):
+    """``{signal: {metric: value}}`` from a sample's quality document."""
+    docs = getattr(quality_doc, "motion_by_signal", None) or ()
+    return {
+        doc.signal: {m: _num(getattr(doc, m, None)) for m in MOTION_METRICS}
+        for doc in docs
+    }
 
 
-def _channel_scores(by_channel, episode_stats):
-    """Per-channel motion score + flag count: ``{channel: {score, n_flags}}``.
+def _signal_scores(by_signal, episode_stats):
+    """Per-signal motion score + flag count: ``{signal: {score, n_flags}}``.
 
     Same robust-z aggregation (and jerk_rms down-weighting) as the engine's
-    `overall_score`, but restricted to one channel's motion metrics -- the
-    ranking table sorts by this when the user isolates a channel in the
+    `overall_score`, but restricted to one signal's motion metrics -- the
+    ranking table sorts by this when the user isolates a signal in the
     legend. Motion-only by construction: health/outlier metrics aren't
-    per-channel.
+    per-signal.
     """
     if not episode_stats:
         return {}
 
     scores = {}
-    for channel, values in by_channel.items():
+    for signal, values in by_signal.items():
         z_by_metric = {}
         for metric in MOTION_METRICS:
             value = values.get(metric)
-            key = metric if channel == LEGACY_CHANNEL else channel_key(metric, channel)
+            key = signal_metric_key(metric, signal)
             stats = episode_stats.get(key)
             if value is None or stats is None:
                 continue
@@ -219,53 +204,53 @@ def _channel_scores(by_channel, episode_stats):
 
         if z_by_metric:
             score, n_flags = normalize.aggregate(z_by_metric, weights=METRIC_WEIGHTS)
-            scores[channel] = {"score": score, "n_flags": n_flags}
+            scores[signal] = {"score": score, "n_flags": n_flags}
     return scores
 
 
-def _motion_worst_channel(quality_doc):
-    """``{metric: channel}`` attribution for the worst-of aggregation.
+def _motion_worst_signal(quality_doc):
+    """``{metric: signal}`` attribution for the worst-of aggregation.
 
     Lets the panel say *which* arm was jerky, not just that the episode was.
-    Empty for pre-v3 scores, which had no per-channel breakdown to attribute.
+    Values identify the exact selected signal that drove each metric.
     """
-    doc = getattr(quality_doc, "motion_worst_channel", None)
+    doc = getattr(quality_doc, "motion_worst_signal", None)
     if doc is None:
         return {}
     return {m: getattr(doc, m, None) for m in MOTION_METRICS if getattr(doc, m, None)}
 
 
-def _histogram(rows, channels, metric):
-    """Multi-series histogram: shared bins across channels, one count per channel.
+def _histogram(rows, signals, metric):
+    """Multi-series histogram: shared bins across signals, one count per signal.
 
-    Returns ``{"channels": [...], "bars": [{x, x0, x1, counts: {channel: n}}]}``.
-    Bins are fit on the pooled values so channel series are directly
-    overlayable; for unit-incompatible channels the shared axis is wide but
+    Returns ``{"signals": [...], "bars": [{x, x0, x1, counts: {signal: n}}]}``.
+    Bins are fit on the pooled values so signal series are directly
+    overlayable; for unit-incompatible signals the shared axis is wide but
     still correct.
     """
-    values_by_channel = {}
-    for channel in channels:
-        values = (r["by_channel"].get(channel, {}).get(metric) for r in rows)
-        values_by_channel[channel] = [v for v in values if v is not None]
+    values_by_signal = {}
+    for signal in signals:
+        values = (r["by_signal"].get(signal, {}).get(metric) for r in rows)
+        values_by_signal[signal] = [v for v in values if v is not None]
 
-    pooled = [v for values in values_by_channel.values() for v in values]
+    pooled = [v for values in values_by_signal.values() for v in values]
     if not pooled:
-        return {"channels": [], "bars": []}
+        return {"signals": [], "bars": []}
 
     _, edges = np.histogram(np.asarray(pooled, dtype=np.float64), bins=HISTOGRAM_BINS)
-    present = [c for c in channels if values_by_channel[c]]
-    counts_by_channel = {
-        channel: np.histogram(np.asarray(values_by_channel[channel], dtype=np.float64), bins=edges)[0]
-        for channel in present
+    present = [signal for signal in signals if values_by_signal[signal]]
+    counts_by_signal = {
+        signal: np.histogram(np.asarray(values_by_signal[signal], dtype=np.float64), bins=edges)[0]
+        for signal in present
     }
     return {
-        "channels": present,
+        "signals": present,
         "bars": [
             {
                 "x": float((edges[i] + edges[i + 1]) / 2),
                 "x0": float(edges[i]),
                 "x1": float(edges[i + 1]),
-                "counts": {channel: int(counts_by_channel[channel][i]) for channel in present},
+                "counts": {signal: int(counts_by_signal[signal][i]) for signal in present},
             }
             for i in range(len(edges) - 1)
         ],

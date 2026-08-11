@@ -12,6 +12,7 @@ const TABS = [
   { id: "health", label: "Health" },
   { id: "outliers", label: "Outliers" },
 ];
+const DEFAULT_TAB = TABS[0].id;
 
 // Which tabs the last run actually produced data for. A family can be
 // deselected at scoring time, and its tab then has nothing to draw.
@@ -34,7 +35,7 @@ export default function QualityPanel() {
   const selected = useRecoilValue(fos.selectedSamples);
 
   const [data, setData] = useState<PanelData | null>(null);
-  const [activeTab, setActiveTab] = useState("motion");
+  const [activeTab, setActiveTab] = useState(DEFAULT_TAB);
   const tabPicked = useRef(false);
 
   // One backend call per refresh; re-fetch whenever the view changes.
@@ -53,7 +54,7 @@ export default function QualityPanel() {
     // fight the user once they've picked a tab themselves.
     if (!tabPicked.current && next.scored) {
       const scored = scoredByTab(next);
-      setActiveTab(TABS.find((t) => scored[t.id])?.id ?? "motion");
+      setActiveTab(TABS.find((t) => scored[t.id])?.id ?? DEFAULT_TAB);
     }
   }, [dataOp.result]);
 

@@ -1,4 +1,4 @@
-"""Dataset-wide robust normalization (median/MAD z-scores).
+"""Dataset-wide robust normalization with median-centered one-sided scales.
 
 Generic over metric names: callers decide which raw per-episode metrics to
 normalize, their polarity, and how to combine them. Keeping this module
@@ -82,11 +82,12 @@ def _one_sided_scale(values, median, above):
     gap = (quantile - median) if above else (median - quantile)
     if gap > 0:
         return gap * MAD_TO_STD
-    return _zero_inflated_scale(np.abs(values - median))
+    deviations = values[values > median] - median if above else median - values[values < median]
+    return _zero_inflated_scale(deviations)
 
 
 def _zero_inflated_scale(deviations):
-    """Scale for a metric whose corpus is mostly one repeated value.
+    """Scale for a metric whose selected tail is mostly one repeated value.
 
     dropout, clock drift and desync all read exactly zero for most episodes
     of a clean dataset, so there's no spread to measure and the choice of
@@ -95,9 +96,9 @@ def _zero_inflated_scale(deviations):
     dropout both divide out past the clip into an identical hard "fail" that
     also dumps a maximal term into the composite score. Instead the scale is
     set so a typical member of the nonzero tail lands exactly on the warn
-    threshold -- being in the tail at all earns a human glance, being further
-    out earns proportionally more, and a lone anomaly in an otherwise
-    spotless corpus still warns rather than vanishing.
+    threshold -- being in the bad tail at all earns a human glance, being
+    further out earns proportionally more, and variation on the opposite
+    (good) side never sets this denominator.
     """
     tail = deviations[deviations > 0]
     if len(tail) == 0:

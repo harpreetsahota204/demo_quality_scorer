@@ -7,12 +7,12 @@ export interface QualityRow {
   ldlj: number | null;
   jerk_rms: number | null;
   psd_lf_hf: number | null;
-  /** Per-channel motion metric values: {channel: {metric: value}} */
-  by_channel: Record<string, Record<string, number | null>>;
-  /** Per-channel motion-only score/flags (same z aggregation as overall_score) */
-  channel_scores: Record<string, { score: number; n_flags: number }>;
-  /** Which channel's z-score drove each top-level motion value */
-  worst_channel: Record<string, string>;
+  /** Per-signal motion metric values: {signal: {metric: value}} */
+  by_signal: Record<string, Record<string, number | null>>;
+  /** Per-signal motion-only score/flags (same z aggregation as overall_score) */
+  signal_scores: Record<string, { score: number; n_flags: number }>;
+  /** Which signal's z-score drove each top-level motion value */
+  worst_signal: Record<string, string>;
   iforest_score: number | null;
   knn_dist: number | null;
   is_outlier: boolean;
@@ -24,22 +24,24 @@ export interface HistogramBar {
   x: number;
   x0: number;
   x1: number;
-  /** Episode count per channel for this bin (shared bin grid) */
+  /** Episode count per signal for this bin (shared bin grid) */
   counts: Record<string, number>;
 }
 
 export interface MetricHistogramData {
-  channels: string[];
+  signals: string[];
   bars: HistogramBar[];
 }
 
 export interface PanelData {
   scored: boolean;
   rows: QualityRow[];
-  channels: string[];
+  signals: string[];
   histograms: Record<string, MetricHistogramData>;
-  /** Per metric, per channel: warn threshold in the channel's own units */
+  /** Per metric, per signal: warn threshold in the signal's own units */
   warn_thresholds: Record<string, Record<string, number>>;
+  warn_z: number;
+  fail_z: number;
   verdict_counts: Record<string, number>;
   smoother_direction: Record<string, "left" | "right">;
   motion_scored: boolean;

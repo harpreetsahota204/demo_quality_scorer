@@ -1,4 +1,3 @@
-import React from "react";
 import { PluginComponentType, registerComponent } from "@fiftyone/plugins";
 import QualityPanel from "./QualityPanel";
 

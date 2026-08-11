@@ -12,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { channelColor, theme, verdictColor } from "./theme";
+import { signalColor, theme, verdictColor } from "./theme";
 import { HistogramBar, MetricHistogramData, QualityRow } from "./types";
 
 const axisStyle = { fontSize: 10, fill: theme.textDim };
@@ -42,7 +42,7 @@ const tooltipStyle: React.CSSProperties = {
   padding: "6px 10px",
 };
 
-function HistTooltip({ active, payload, channels, allChannels }: any) {
+function HistTooltip({ active, payload, signals, allSignals }: any) {
   if (!active || !payload?.length) return null;
   const bar: HistogramBar = payload[0].payload;
   return (
@@ -50,10 +50,10 @@ function HistTooltip({ active, payload, channels, allChannels }: any) {
       <div>
         {bar.x0.toPrecision(3)} to {bar.x1.toPrecision(3)}
       </div>
-      {channels.map((channel: string) => (
-        <div key={channel} style={{ color: channelColor(allChannels, channel) }}>
-          {allChannels.length > 1 ? `${channel}: ` : ""}
-          {bar.counts[channel] ?? 0} episode(s)
+      {signals.map((signal: string) => (
+        <div key={signal} style={{ color: signalColor(allSignals, signal) }}>
+          {allSignals.length > 1 ? `${signal}: ` : ""}
+          {bar.counts[signal] ?? 0} episode(s)
         </div>
       ))}
     </div>
@@ -62,32 +62,32 @@ function HistTooltip({ active, payload, channels, allChannels }: any) {
 
 export function MetricHistogram(props: {
   data: MetricHistogramData;
-  /** Full channel list across the tab -- keeps series colors stable while filtering */
-  allChannels: string[];
-  /** When set, render only this channel's series */
-  filterChannel?: string | null;
+  /** Full signal list across the tab -- keeps series colors stable while filtering */
+  allSignals: string[];
+  /** When set, render only this signal's series */
+  filterSignal?: string | null;
   /** X-axis label (the metric's short name; values are in the metric's own units) */
   xLabel: string;
-  height?: number;
+  height: number;
   warnThresholds?: Record<string, number>;
-  onBarClick?: (bar: HistogramBar, channel: string) => void;
+  onBarClick?: (bar: HistogramBar, signal: string) => void;
 }) {
-  const { data, allChannels, filterChannel, xLabel, height = 200, warnThresholds, onBarClick } = props;
+  const { data, allSignals, filterSignal, xLabel, height, warnThresholds, onBarClick } = props;
   const { bars } = data;
-  const channels =
-    filterChannel && data.channels.includes(filterChannel) ? [filterChannel] : data.channels;
-  const multi = allChannels.length > 1;
+  const signals =
+    filterSignal && data.signals.includes(filterSignal) ? [filterSignal] : data.signals;
+  const multi = allSignals.length > 1;
 
-  // The x-axis is categorical (one band per bin), so anchor each channel's
+  // The x-axis is categorical (one band per bin), so anchor each signal's
   // warn line to the bin whose range contains its threshold.
-  const warnLines: { channel: string; x: number }[] = [];
-  for (const channel of channels) {
-    const threshold = warnThresholds?.[channel];
+  const warnLines: { signal: string; x: number }[] = [];
+  for (const signal of signals) {
+    const threshold = warnThresholds?.[signal];
     if (threshold === undefined || bars.length === 0) continue;
     const hit =
       bars.find((b) => threshold >= b.x0 && threshold < b.x1) ??
       (threshold >= bars[bars.length - 1].x1 ? bars[bars.length - 1] : bars[0]);
-    warnLines.push({ channel, x: hit.x });
+    warnLines.push({ signal, x: hit.x });
   }
 
   return (
@@ -120,26 +120,26 @@ export function MetricHistogram(props: {
           }}
         />
         <Tooltip
-          content={<HistTooltip channels={channels} allChannels={allChannels} />}
+          content={<HistTooltip signals={signals} allSignals={allSignals} />}
           cursor={{ fill: "#ffffff10" }}
         />
-        {channels.map((channel) => (
+        {signals.map((signal) => (
           <Bar
-            key={channel}
-            name={channel}
-            dataKey={(bar: HistogramBar) => bar.counts[channel] ?? 0}
-            fill={multi ? channelColor(allChannels, channel) : theme.bar}
+            key={signal}
+            name={signal}
+            dataKey={(bar: HistogramBar) => bar.counts[signal] ?? 0}
+            fill={multi ? signalColor(allSignals, signal) : theme.bar}
             radius={[2, 2, 0, 0]}
             isAnimationActive={false}
-            onClick={(entry: any) => onBarClick?.((entry?.payload ?? entry) as HistogramBar, channel)}
+            onClick={(entry: any) => onBarClick?.((entry?.payload ?? entry) as HistogramBar, signal)}
             style={{ cursor: onBarClick ? "pointer" : "default" }}
           />
         ))}
-        {warnLines.map(({ channel, x }) => (
+        {warnLines.map(({ signal, x }) => (
           <ReferenceLine
-            key={channel}
+            key={signal}
             x={x}
-            stroke={multi ? channelColor(allChannels, channel) : theme.warn}
+            stroke={multi ? signalColor(allSignals, signal) : theme.warn}
             strokeDasharray="5 4"
             label={
               multi ? undefined : { value: "warn", position: "top", fill: theme.warn, fontSize: 10 }

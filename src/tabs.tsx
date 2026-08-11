@@ -1,6 +1,6 @@
 import React from "react";
 import { MetricHistogram, OutlierScatter, VerdictBar } from "./charts";
-import { channelColor, fmt, theme, verdictColor } from "./theme";
+import { fmt, signalColor, theme, verdictColor } from "./theme";
 import { Card, Chip, DataTable } from "./ui";
 import {
   HistogramBar,
@@ -11,20 +11,23 @@ import {
   QualityRow,
 } from "./types";
 
-export type ShowEpisodes = (ids: string[], description: string) => void;
+type ShowEpisodes = (ids: string[], description: string) => void;
+
+const OVERALL_WARN_SCORE = 1;
+const OVERALL_FAIL_SCORE = 2;
 
 // Matches numpy.histogram bin semantics: bins are half-open [x0, x1) except
 // the last bin, which also includes its right edge. Values are looked up on
-// the clicked channel's series.
+// the clicked signal's series.
 function rowsInBin(
   rows: QualityRow[],
   metric: MotionMetric,
-  channel: string,
+  signal: string,
   bar: HistogramBar,
   isLast: boolean
 ): QualityRow[] {
   return rows.filter((r) => {
-    const v = r.by_channel?.[channel]?.[metric];
+    const v = r.by_signal?.[signal]?.[metric];
     if (v === null || v === undefined) return false;
     return v >= bar.x0 && (v < bar.x1 || (isLast && v <= bar.x1));
   });
@@ -38,9 +41,9 @@ const EXPLAINERS: Record<string, string> = {
     "Spectral Arc Length: motion smoothness measured from the shape of the speed profile's " +
     "frequency spectrum. Smooth, well-coordinated motion has a simple spectrum and a value " +
     "closer to 0; jerky, fragmented motion drags it more negative. Bars count episodes in the " +
-    "current view, one colored series per scored channel (each channel is normalized against " +
+    "current view, one colored series per selected signal (each signal is normalized against " +
     "its own dataset-wide stats); dashed lines mark warn thresholds. Click a bar to filter the " +
-    "samples panel to the episodes in that range on that channel.",
+    "samples panel to the episodes in that range on that signal.",
   ldlj:
     "Log Dimensionless Jerk: total jerk (rate of change of acceleration) over the episode, " +
     "scaled to be comparable across motions of different speeds and durations, then " +
@@ -58,17 +61,15 @@ const EXPLAINERS: Record<string, string> = {
     "z-score: how many robust standard deviations worse than the dataset median the episode " +
     "is, measured with a spread fit from the metric's own bad tail, so scores are comparable " +
     "across metrics with different units and skew. When " +
-    "several channels are scored, each metric shows its worst channel's value (worst-of, not " +
-    "averaged \u2014 a smooth arm never masks a jerky one); hover a value for the per-channel " +
-    "breakdown. Isolating a channel in the legend re-ranks the table by that channel's " +
-    "motion-only score and shows its values. Flags counts metrics at warn severity (z \u2265 2) " +
-    "or worse.",
+    "several signals are scored, each metric shows its worst signal's value (worst-of, not " +
+    "averaged \u2014 a smooth arm never masks a jerky one); hover a value for the per-signal " +
+    "breakdown. Isolating a signal in the legend re-ranks the table by that signal's " +
+    "motion-only score and shows its values.",
   health_verdicts:
     "Sensor-health rollup per episode, computed from raw message timestamps and values: " +
     "dropouts, frame-rate stability, clock drift, cross-channel desync, and value clipping. " +
-    "Each metric is z-scored against this dataset; an episode fails if any metric is \u2265 3 " +
-    "robust standard deviations worse than the dataset median, and warns at \u2265 2. Click a " +
-    "bar to filter the samples panel to the episodes with that verdict.",
+    "Each metric is z-scored against this dataset. Click a bar to filter the samples panel to " +
+    "the episodes with that verdict.",
   health_table:
     "Per-episode health verdicts. The worst-metric column names the health metric with the " +
     "highest z-score, i.e. the one that drove the verdict, so you know what to inspect first " +
@@ -78,21 +79,22 @@ const EXPLAINERS: Record<string, string> = {
     "quality scalars. X: Isolation Forest score, how easily the episode is separated from the " +
     "rest (higher = more anomalous). Y: mean distance to its k nearest neighbors, how far it " +
     "sits from its most similar episodes. Top-right points are unusual by both measures; red " +
-    "points crossed the warn threshold.",
+    "points crossed the warn threshold. Outlier scores stay separate from Overall because " +
+    "unusual episodes can be exceptionally clean rather than bad.",
 };
 
-// Ranking-table metric cell: worst channel's value, with a hover title
-// breaking the value down per channel when several were scored
+// Ranking-table metric cell: worst signal's value, with a hover title
+// breaking the value down per signal when several were scored
 function metricCell(row: QualityRow, metric: MotionMetric): React.ReactNode {
-  const channels = Object.keys(row.by_channel ?? {});
-  if (channels.length < 2) return fmt(row[metric]);
+  const signals = Object.keys(row.by_signal ?? {});
+  if (signals.length < 2) return fmt(row[metric]);
 
-  const worst = row.worst_channel?.[metric];
-  const breakdown = channels
-    .map((c) => {
-      const v = row.by_channel[c]?.[metric];
-      const marker = c === worst ? " (worst, shown)" : "";
-      return `${c}: ${v === null || v === undefined ? "–" : v.toFixed(3)}${marker}`;
+  const worst = row.worst_signal?.[metric];
+  const breakdown = signals
+    .map((signal) => {
+      const v = row.by_signal[signal]?.[metric];
+      const marker = signal === worst ? " (worst, shown)" : "";
+      return `${signal}: ${v === null || v === undefined ? "–" : v.toFixed(3)}${marker}`;
     })
     .join("\n");
   return <span title={breakdown}>{fmt(row[metric])}</span>;
@@ -103,8 +105,8 @@ function metricCell(row: QualityRow, metric: MotionMetric): React.ReactNode {
 // reaches only by being broadly bad rather than by failing one metric.
 function scoreColor(score: number | null): string {
   if (score === null) return theme.text;
-  if (score >= 2) return theme.fail;
-  if (score >= 1) return theme.warn;
+  if (score >= OVERALL_FAIL_SCORE) return theme.fail;
+  if (score >= OVERALL_WARN_SCORE) return theme.warn;
   return theme.text;
 }
 
@@ -122,31 +124,32 @@ export function FamilyNotScored(props: { family: string }) {
   );
 }
 
-// One shared legend for every histogram on the tab. Clicking a topic
+// One shared legend for every histogram on the tab. Clicking a signal
 // isolates its series across all plots; clicking it again shows everything.
-function ChannelLegendBar(props: {
-  channels: string[];
+function SignalLegendBar(props: {
+  signals: string[];
   active: string | null;
-  onPick: (channel: string | null) => void;
+  onPick: (signal: string | null) => void;
 }) {
-  const { channels, active, onPick } = props;
-  if (channels.length < 2) return null;
+  const { signals, active, onPick } = props;
+  if (signals.length < 2) return null;
   return (
     <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-      {channels.map((channel) => {
-        const isActive = active === channel;
+      {signals.map((signal) => {
+        const isActive = active === signal;
         const dimmed = active !== null && !isActive;
+        const color = signalColor(signals, signal);
         return (
           <button
-            key={channel}
-            onClick={() => onPick(isActive ? null : channel)}
-            title={isActive ? "Show all channels" : `Show only ${channel}`}
+            key={signal}
+            onClick={() => onPick(isActive ? null : signal)}
+            title={isActive ? "Show all signals" : `Show only ${signal}`}
             style={{
               display: "inline-flex",
               alignItems: "center",
               gap: 5,
-              background: isActive ? `${channelColor(channels, channel)}22` : "transparent",
-              border: `1px solid ${isActive ? channelColor(channels, channel) : theme.cardBorder}`,
+              background: isActive ? `${color}22` : "transparent",
+              border: `1px solid ${isActive ? color : theme.cardBorder}`,
               borderRadius: 12,
               padding: "2px 9px",
               fontSize: 11,
@@ -161,10 +164,10 @@ function ChannelLegendBar(props: {
                 width: 8,
                 height: 8,
                 borderRadius: 2,
-                background: channelColor(channels, channel),
+                background: color,
               }}
             />
-            {channel}
+            {signal}
           </button>
         );
       })}
@@ -221,22 +224,22 @@ export function MotionTab(props: {
   onShow: ShowEpisodes;
 }) {
   const { data, onShow } = props;
-  const [activeChannel, setActiveChannel] = React.useState<string | null>(null);
+  const [activeSignal, setActiveSignal] = React.useState<string | null>(null);
   const [expanded, setExpanded] = React.useState<MotionMetric | null>(null);
   const shownMetrics = expanded ? [expanded] : [...MOTION_METRICS];
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {data.channels.length > 1 && (
+      {data.signals.length > 1 && (
         <div style={{ fontSize: 11, color: theme.textDim, marginBottom: -4 }}>
-          {activeChannel
-            ? `showing only ${activeChannel} · click its chip again to show all channels`
-            : "click a channel chip to isolate it"}
+          {activeSignal
+            ? `showing only ${activeSignal} · click its chip again to show all signals`
+            : "click a signal chip to isolate it"}
         </div>
       )}
-      <ChannelLegendBar
-        channels={data.channels}
-        active={activeChannel}
-        onPick={setActiveChannel}
+      <SignalLegendBar
+        signals={data.signals}
+        active={activeSignal}
+        onPick={setActiveSignal}
       />
       <div style={{ fontSize: 11, color: theme.textDim }}>
         click any bar to filter the samples panel · dashed lines = warn thresholds
@@ -249,10 +252,10 @@ export function MotionTab(props: {
         }}
       >
         {shownMetrics.map((metric) => {
-          const hist = data.histograms[metric] ?? { channels: [], bars: [] };
+          const hist = data.histograms[metric] ?? { signals: [], bars: [] };
           const thresholds = data.warn_thresholds[metric];
           const arrow = data.smoother_direction[metric] === "left" ? "← smoother" : "smoother →";
-          const single = hist.channels.length === 1 ? thresholds?.[hist.channels[0]] : undefined;
+          const single = hist.signals.length === 1 ? thresholds?.[hist.signals[0]] : undefined;
           // Shared cues (bar-click filtering, dashed warn lines) live once in
           // the legend hint; the subtitle stays per-metric only
           const subtitle =
@@ -263,7 +266,7 @@ export function MotionTab(props: {
             <Card
               key={metric}
               title={METRIC_LABELS[metric].title}
-              subtitle={hist.channels.length > 0 ? subtitle : undefined}
+              subtitle={hist.signals.length > 0 ? subtitle : undefined}
               info={EXPLAINERS[metric]}
               action={
                 <ExpandToggle
@@ -272,7 +275,7 @@ export function MotionTab(props: {
                 />
               }
             >
-              {hist.channels.length === 0 ? (
+              {hist.signals.length === 0 ? (
                 <div
                   style={{
                     height: 180,
@@ -288,19 +291,19 @@ export function MotionTab(props: {
               ) : (
                 <MetricHistogram
                   data={hist}
-                  allChannels={data.channels}
-                  filterChannel={activeChannel}
+                  allSignals={data.signals}
+                  filterSignal={activeSignal}
                   xLabel={METRIC_LABELS[metric].short}
                   height={expanded ? 480 : 200}
                   warnThresholds={thresholds}
-                  onBarClick={(bar, channel) => {
+                  onBarClick={(bar, signal) => {
                     const bars = hist.bars;
                     const isLast = bars.length > 0 && bar.x1 === bars[bars.length - 1].x1;
-                    const hits = rowsInBin(data.rows, metric, channel, bar, isLast);
-                    const channelNote = hist.channels.length > 1 ? ` on ${channel}` : "";
+                    const hits = rowsInBin(data.rows, metric, signal, bar, isLast);
+                    const signalNote = hist.signals.length > 1 ? ` on ${signal}` : "";
                     onShow(
                       hits.map((r) => r.id),
-                      `${METRIC_LABELS[metric].short}${channelNote} in [${bar.x0.toPrecision(3)}, ${bar.x1.toPrecision(3)}]`
+                      `${METRIC_LABELS[metric].short}${signalNote} in [${bar.x0.toPrecision(3)}, ${bar.x1.toPrecision(3)}]`
                     );
                   }}
                 />
@@ -310,47 +313,53 @@ export function MotionTab(props: {
         })}
       </div>
 
-      <RankingTable rows={data.rows} activeChannel={activeChannel} onOpen={props.onOpen} />
+      <RankingTable
+        rows={data.rows}
+        activeSignal={activeSignal}
+        warnZ={data.warn_z}
+        onOpen={props.onOpen}
+      />
     </div>
   );
 }
 
-// Worst-first ranking. With a channel isolated in the legend, both the
-// values and the sort key switch to that channel: metric cells show the
-// channel's own values and rows re-rank by its motion-only score (health/
-// outlier metrics aren't per-channel, so they can't contribute there).
+// Worst-first ranking. With a signal isolated in the legend, both the
+// values and the sort key switch to that signal: metric cells show the
+// signal's own values and rows re-rank by its motion-only score (health/
+// outlier metrics aren't per-signal, so they can't contribute there).
 function RankingTable(props: {
   rows: QualityRow[];
-  activeChannel: string | null;
+  activeSignal: string | null;
+  warnZ: number;
   onOpen: (id: string) => void;
 }) {
-  const { rows, activeChannel, onOpen } = props;
+  const { rows, activeSignal, warnZ, onOpen } = props;
 
-  const channelScore = (r: QualityRow) =>
-    activeChannel ? r.channel_scores?.[activeChannel]?.score ?? null : r.overall_score;
-  const channelFlags = (r: QualityRow) =>
-    activeChannel ? r.channel_scores?.[activeChannel]?.n_flags ?? 0 : r.n_flags;
+  const signalScore = (r: QualityRow) =>
+    activeSignal ? r.signal_scores?.[activeSignal]?.score ?? null : r.overall_score;
+  const signalFlags = (r: QualityRow) =>
+    activeSignal ? r.signal_scores?.[activeSignal]?.n_flags ?? 0 : r.n_flags;
 
   // Backend rows are pre-sorted by overall_score; re-rank client-side when
-  // a channel is isolated (episodes without that channel sink to the bottom)
-  const sorted = activeChannel
-    ? [...rows].sort((a, b) => (channelScore(b) ?? -Infinity) - (channelScore(a) ?? -Infinity))
+  // a signal is isolated (episodes without that signal sink to the bottom)
+  const sorted = activeSignal
+    ? [...rows].sort((a, b) => (signalScore(b) ?? -Infinity) - (signalScore(a) ?? -Infinity))
     : rows;
 
   return (
     <Card
       title="Worst-first ranking"
       subtitle={
-        activeChannel
-          ? `ranked by ${activeChannel} (motion metrics only) · click a row to open the episode`
+        activeSignal
+          ? `ranked by ${activeSignal} (motion metrics only) · click a row to open the episode`
           : "Click a row to open the episode"
       }
-      info={EXPLAINERS.ranking}
+      info={`${EXPLAINERS.ranking} Flags count metrics at warn severity (z \u2265 ${warnZ}) or worse.`}
     >
       <DataTable
         columns={[
           { key: "episode", label: "Episode" },
-          { key: "overall_score", label: activeChannel ? "Motion score" : "Overall", align: "right" },
+          { key: "overall_score", label: activeSignal ? "Motion score" : "Overall", align: "right" },
           { key: "n_flags", label: "Flags", align: "right" },
           ...MOTION_METRICS.map((m) => ({
             key: m,
@@ -362,15 +371,15 @@ function RankingTable(props: {
         rows={sorted.map((r) => ({
           episode: r.episode,
           overall_score: (
-            <span style={{ color: scoreColor(channelScore(r)), fontWeight: 600 }}>
-              {fmt(channelScore(r))}
+            <span style={{ color: scoreColor(signalScore(r)), fontWeight: 600 }}>
+              {fmt(signalScore(r))}
             </span>
           ),
-          n_flags: channelFlags(r),
+          n_flags: signalFlags(r),
           ...Object.fromEntries(
             MOTION_METRICS.map((m) => [
               m,
-              activeChannel ? fmt(r.by_channel?.[activeChannel]?.[m]) : metricCell(r, m),
+              activeSignal ? fmt(r.by_signal?.[activeSignal]?.[m]) : metricCell(r, m),
             ])
           ),
         }))}
@@ -397,8 +406,8 @@ export function HealthTab(props: {
       >
         <Card
           title="Health verdicts"
-          subtitle="fail: any metric z ≥ 3 · warn: any z ≥ 2 · click a bar to filter"
-          info={EXPLAINERS.health_verdicts}
+          subtitle={`fail: any metric z \u2265 ${data.fail_z} · warn: any z \u2265 ${data.warn_z} · click a bar to filter`}
+          info={`${EXPLAINERS.health_verdicts} An episode fails if any metric is \u2265 ${data.fail_z} robust standard deviations worse than the dataset median, and warns at \u2265 ${data.warn_z}.`}
         >
           <VerdictBar
             counts={data.verdict_counts}

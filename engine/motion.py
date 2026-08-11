@@ -28,14 +28,11 @@ HIGHER_IS_WORSE = {
 # it and the trim math in jerk_rms depends on the same value.
 FILTER_ORDER = 4
 
-# Relative spread below which a speed profile counts as constant, i.e. as
-# carrying no motion at all. See has_speed_variation.
-SPEED_VARIATION_TOLERANCE = 1e-9
-
 # Default low-pass cutoff for jerk_rms's pre-filter, in Hz. Named because the
 # operator form, the engine signature and the run config all need the same
 # number and must not drift apart.
 JERK_CUTOFF_HZ_DEFAULT = 10.0
+PSD_MAX_SEGMENT_SAMPLES = 64
 
 
 def lowpass_filtfilt(signal, cutoff_hz, fs, order=FILTER_ORDER):
@@ -58,14 +55,12 @@ def lowpass_filtfilt(signal, cutoff_hz, fs, order=FILTER_ORDER):
     return filtfilt(b, a, signal)
 
 
-def speed_profile(vectors, group, fs):
+def speed_profile(vectors, source_kind, fs):
     """Derives a 1-D speed profile from a window's ``(n_samples, n_dims)`` vectors.
 
-    If the field-group's name already suggests a rate (contains "vel" or
-    "speed"), its vector norm is used directly. Otherwise the vectors are
-    treated as a position-like trajectory and differentiated, since
-    SPARC/LDLJ are defined over a velocity/speed profile, not a raw position
-    signal.
+    ``source_kind`` is explicitly selected by the user as ``"position"`` or
+    ``"velocity"``. Position is differentiated once; velocity is used
+    directly.
 
     The difference is divided by the sample interval (multiplied by `fs`), so
     a position-derived profile comes out in units per *second* the way a
@@ -76,43 +71,17 @@ def speed_profile(vectors, group, fs):
 
     Args:
         vectors: an ``(n_samples, n_dims)`` array
-        group: the field-group name the vectors came from
-        fs: the channel's sampling rate, in Hz
+        source_kind: ``"position"`` or ``"velocity"``
+        fs: the signal's sampling rate, in Hz
 
     Returns:
         a 1-D array, one shorter than ``vectors`` if differentiated
     """
-    if "vel" in group.lower() or "speed" in group.lower():
+    if source_kind == "velocity":
         return np.linalg.norm(vectors, axis=1)
-    return np.linalg.norm(np.diff(vectors, axis=0), axis=1) * fs
-
-
-def has_speed_variation(vectors, group, fs, tolerance=SPEED_VARIATION_TOLERANCE):
-    """True if a field group's speed profile changes at all over the episode.
-
-    Decoding a channel generically surfaces every numeric field it carries,
-    and plenty of those hold constants: covariance blocks, point-cloud
-    dimensions and strides, camera intrinsics, static transforms. Each becomes
-    a field group that looks scorable and isn't. Scoring one contributes a
-    constant column to the corpus normalization fit and to the outlier feature
-    matrix, and lets a channel's own metadata compete with its real motion in
-    the worst-of rollup.
-
-    A constant speed profile is the exact, name-free test for that. It also
-    catches a monotonically increasing field (a sequence counter, a numeric
-    clock), whose speed is a nonzero constant, since neither carries motion
-    either. `tolerance` is relative to the profile's own magnitude, so this
-    doesn't depend on a channel's units.
-    """
-    if np.isnan(fs) or fs <= 0:
-        return False
-    speed = speed_profile(vectors, group, fs)
-    speed = speed[~np.isnan(speed)]
-    if len(speed) < 2:
-        return False
-    spread = float(np.max(speed) - np.min(speed))
-    magnitude = float(np.max(np.abs(speed)))
-    return spread > tolerance * max(magnitude, 1.0)
+    if source_kind == "position":
+        return np.linalg.norm(np.diff(vectors, axis=0), axis=1) * fs
+    raise ValueError(f"Unsupported motion source kind: {source_kind!r}")
 
 
 def sparc(speed, fs, fc=10.0, amp_threshold=0.05, pad_level=4):
@@ -187,7 +156,7 @@ def ldlj(speed, fs):
     stationary signal the whole quantity scales as roughly ``duration**4``.
     Comparing LDLJ across unequal spans is meaningless -- halving the span
     adds about 2.8 to the result on identical motion. This is why
-    :func:`.windowing.windows_for_group` emits only complete windows.
+    windowing emits only complete windows.
     """
     if len(speed) < 5 or fs <= 0:
         return np.nan
@@ -216,8 +185,11 @@ def jerk_rms(speed, fs, cutoff_hz=JERK_CUTOFF_HZ_DEFAULT):
     if len(speed) < 5 or fs <= 0:
         return np.nan
 
+    nyquist = fs / 2.0
+    padlen = 3 * (FILTER_ORDER + 1)
+    filter_applied = 0 < cutoff_hz < nyquist and len(speed) > padlen
     filtered = lowpass_filtfilt(speed, cutoff_hz, fs)
-    trim = min(len(filtered) // 4, 3 * FILTER_ORDER)
+    trim = min(len(filtered) // 4, 3 * FILTER_ORDER) if filter_applied else 0
     trimmed = filtered[trim : len(filtered) - trim] if trim > 0 else filtered
     if len(trimmed) < 5:
         return np.nan
@@ -248,7 +220,11 @@ def psd_lf_hf(speed, fs, cutoff_hz=None):
     if len(speed) < 8 or fs <= 0:
         return np.nan
 
-    freqs, power = welch(speed, fs=fs, nperseg=min(len(speed), 64))
+    freqs, power = welch(
+        speed,
+        fs=fs,
+        nperseg=min(len(speed), PSD_MAX_SEGMENT_SAMPLES),
+    )
     cutoff_hz = cutoff_hz if cutoff_hz is not None else fs / 4.0
     low = power[freqs <= cutoff_hz].sum()
     high = power[freqs > cutoff_hz].sum()

@@ -78,8 +78,9 @@ class TagQualityEpisodes(foo.Operator):
         ids = ctx.params.get("sample_ids") or []
         target = ctx.dataset.select(ids) if ids else ctx.view
         target.tag_samples(tag)
-        ctx.ops.notify(f"Tagged {len(target)} episode(s) as '{tag}'.")
-        return {"tagged": len(target)}
+        tagged_count = len(target)
+        ctx.ops.notify(f"Tagged {tagged_count} episode(s) as '{tag}'.")
+        return {"tagged": tagged_count}
 
 
 class ShowQualityEpisodes(foo.Operator):

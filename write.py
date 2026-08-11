@@ -30,26 +30,28 @@ import fiftyone.core.tags as fota
 TEMPORAL_TAG_ANCHOR = "demo_quality_scorer"
 
 
-def build_quality_document(scalars, config_version, motion_by_channel=None, motion_worst_channel=None):
+def build_quality_document(
+    scalars,
+    config_version,
+    motion_by_signal=None,
+    motion_sources=None,
+    motion_worst_signal=None,
+):
     """Builds the ``quality`` field payload for one sample from its raw scalars.
 
     Args:
         scalars: an :class:`engine.score.EpisodeResult`'s ``scalars`` dict
             (flat, with ``"health.<name>"`` keys for nested health fields).
-            Motion values here are already the worst channel's (see
+            Motion values here are already the worst selected signal's (see
             ``engine.score.finalize_batch``)
         config_version: the :class:`engine.score.EpisodeResult`'s
             ``config_version`` -- provenance, not a metric, so it's kept
             out of ``scalars`` (and out of any z-scoring/aggregation) and
             written directly as ``quality.config_version``
-        motion_by_channel (None): ``{topic: {metric: value}}``. Written as
-            ``quality.motion_by_channel``, a *list* of embedded docs each
-            carrying a ``channel`` field -- channel topics ("/left-arm-state")
-            aren't valid FiftyOne field names, so a topic-keyed dict can't
-            be stored directly
-        motion_worst_channel (None): ``{metric: topic}``, written as
-            ``quality.motion_worst_channel`` -- which channel's z-score
-            drove each top-level motion value
+        motion_by_signal (None): ``{signal_key: {metric: value}}``, written as
+            embedded signal documents
+        motion_sources (None): source provenance keyed by signal
+        motion_worst_signal (None): ``{metric: signal_key}``
 
     Returns:
         a :class:`fiftyone.core.odm.embedded_document.DynamicEmbeddedDocument`
@@ -63,13 +65,24 @@ def build_quality_document(scalars, config_version, motion_by_channel=None, moti
 
     if health:
         top_level["health"] = fo.DynamicEmbeddedDocument(**health)
-    if motion_by_channel:
-        top_level["motion_by_channel"] = [
-            fo.DynamicEmbeddedDocument(channel=topic, **values)
-            for topic, values in sorted(motion_by_channel.items())
-        ]
-    if motion_worst_channel:
-        top_level["motion_worst_channel"] = fo.DynamicEmbeddedDocument(**motion_worst_channel)
+    if motion_by_signal:
+        docs = []
+        for signal, values in sorted(motion_by_signal.items()):
+            source = (motion_sources or {}).get(signal)
+            provenance = (
+                {
+                    "signal": signal,
+                    "channel": source.topic,
+                    "group": source.group,
+                    "kind": source.kind,
+                }
+                if source is not None
+                else {"channel": signal}
+            )
+            docs.append(fo.DynamicEmbeddedDocument(**provenance, **values))
+        top_level["motion_by_signal"] = docs
+    if motion_worst_signal:
+        top_level["motion_worst_signal"] = fo.DynamicEmbeddedDocument(**motion_worst_signal)
     top_level["config_version"] = config_version
     return fo.DynamicEmbeddedDocument(**top_level)
 
@@ -144,7 +157,8 @@ def write_sample(sample, result):
     sample["quality"] = build_quality_document(
         result.scalars,
         result.config_version,
-        motion_by_channel=result.motion_by_channel,
-        motion_worst_channel=result.motion_worst_channel,
+        motion_by_signal=result.motion_by_signal,
+        motion_sources=result.motion_sources,
+        motion_worst_signal=result.motion_worst_signal,
     )
     sample["quality_intervals"] = build_quality_intervals(result.intervals)

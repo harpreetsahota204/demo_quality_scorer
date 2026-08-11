@@ -1,15 +1,8 @@
-"""Activity metrics: idleness and pinned-at-extremes (saturation/clipping).
-
-Saturation operates on a window's raw field-group vectors directly.
-Idleness reuses :func:`motion.speed_profile`, so the "vel"-vs-"position"
-naming heuristic used elsewhere in the engine also governs what "speed"
-means here -- a velocity-named group's raw values ARE the speed, not
-something to re-differentiate.
-"""
+"""Activity metrics: idleness and pinned-at-extremes (saturation/clipping)."""
 
 import numpy as np
 
-from .motion import lowpass_filtfilt, speed_profile
+from .motion import lowpass_filtfilt
 
 IDLE_ALPHA_DEFAULT = 0.05
 IDLE_LOWPASS_CUTOFF_HZ = 10.0
@@ -42,60 +35,25 @@ def _moving_speed_reference(filtered):
     return float(np.median(moving))
 
 
-def episode_idle_threshold(vectors, group, fs, alpha=IDLE_ALPHA_DEFAULT):
-    """Computes a per-episode idle-speed threshold, relative to that episode's own moving speed.
-
-    Absolute thresholds don't generalize across unit scales (rad/s vs m/s vs
-    normalized), so the threshold is a fraction of the channel+group's own
-    moving speed instead.
-
-    That reference is emphatically not the episode's median speed, which is
-    what this used to use: a median-relative threshold inverts on exactly the
-    episodes the metric exists to catch. Once an episode is more than half
-    idle its median speed *is* the idle floor, so the threshold collapses to
-    a fraction of the sensor noise and `idle_frac` reports ~0 -- a 60%-idle
-    episode scored *lower* than a 20%-idle one. See
-    :func:`_moving_speed_reference`.
-
-    Args:
-        vectors: the FULL episode's ``(n_samples, n_dims)`` vectors for one
-            channel+group (not a single window's) -- a stable reference
-            requires the whole episode; a single window's speed distribution
-            shifts with whatever that window happens to contain
-        group: the field-group name (passed through to `speed_profile`)
-        fs: the channel's sampling rate, for the light low-pass
-        alpha (0.05): fraction of the reference speed that counts as "idle"
-
-    Returns:
-        a threshold in the same units as the group's speed profile, or NaN
-        if it can't be computed
-    """
-    if np.isnan(fs) or fs <= 0:
-        return np.nan
-    speed = speed_profile(vectors, group, fs)
-    if len(speed) == 0:
+def idle_threshold_from_speed(speed, fs, alpha=IDLE_ALPHA_DEFAULT):
+    """Computes an idle threshold from uniformly sampled finite speed values."""
+    speed = np.asarray(speed, dtype=np.float64)
+    speed = speed[np.isfinite(speed)]
+    if len(speed) == 0 or np.isnan(fs) or fs <= 0:
         return np.nan
     filtered = np.abs(lowpass_filtfilt(speed, IDLE_LOWPASS_CUTOFF_HZ, fs))
     return float(alpha * _moving_speed_reference(filtered))
 
 
-def idle_frac(vectors, group, threshold, fs):
-    """Fraction of a window's samples below an already-resolved idle-speed threshold.
-
-    `threshold` is computed once per episode via `episode_idle_threshold`
-    and passed in unchanged here, so every window of a group is judged
-    against the same stable reference. The window's own speed is
-    low-pass-filtered and rectified exactly as the threshold's own reference
-    was -- filtered, to avoid spurious blips right at the threshold from
-    noise near zero-crossings; rectified, because filtfilt can push an
-    otherwise non-negative speed slightly below zero there.
-    """
-    if len(vectors) < 2 or np.isnan(threshold) or np.isnan(fs) or fs <= 0:
-        return np.nan
-    speed = speed_profile(vectors, group, fs)
-    if len(speed) == 0:
+def idle_fraction_from_speed(speed, threshold, fs):
+    """Returns the idle fraction of uniformly sampled finite speed values."""
+    speed = np.asarray(speed, dtype=np.float64)
+    speed = speed[np.isfinite(speed)]
+    if len(speed) == 0 or np.isnan(threshold) or np.isnan(fs) or fs <= 0:
         return np.nan
     filtered = np.abs(lowpass_filtfilt(speed, IDLE_LOWPASS_CUTOFF_HZ, fs))
+    if threshold == 0:
+        return float(np.mean(np.isclose(filtered, 0.0)))
     return float(np.mean(filtered < threshold))
 
 
@@ -142,6 +100,9 @@ def pinned_fraction(vectors, tolerance=PINNED_TOLERANCE, min_distinct=PINNED_MIN
     columns = vectors[:, scorable]
     lo, hi = np.nanmin(columns, axis=0), np.nanmax(columns, axis=0)
     span = hi - lo
-    near_lo = np.abs(columns - lo) <= tolerance * span
-    near_hi = np.abs(columns - hi) <= tolerance * span
-    return float(np.mean(near_lo | near_hi))
+    observed = np.isfinite(columns)
+    pinned = observed & (
+        (np.abs(columns - lo) <= tolerance * span)
+        | (np.abs(columns - hi) <= tolerance * span)
+    )
+    return float(np.sum(pinned) / np.sum(observed))

@@ -14,11 +14,11 @@ export const theme = {
   headerBg: "#262626",
 };
 
-// Stable per-channel series colors (first matches theme.bar)
-export const channelColors = ["#5b9bd5", "#e8a33d", "#7cb47c", "#b07cc6", "#c66a6a", "#5bbcb8"];
+// Stable per-signal series colors (first matches theme.bar)
+const signalColors = ["#5b9bd5", "#e8a33d", "#7cb47c", "#b07cc6", "#c66a6a", "#5bbcb8"];
 
-export const channelColor = (channels: string[], channel: string): string =>
-  channelColors[Math.max(0, channels.indexOf(channel)) % channelColors.length];
+export const signalColor = (signals: string[], signal: string): string =>
+  signalColors[Math.max(0, signals.indexOf(signal)) % signalColors.length];
 
 export const verdictColor: Record<string, string> = {
   pass: theme.pass,

@@ -1,16 +1,23 @@
 """The `compute_episode_quality` operator: scores a view's episodes for quality."""
 
+import json
 from functools import lru_cache
 
 import fiftyone.core.tags as fota
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
+import numpy as np
 
 from .engine import activity, motion, windowing
-from .engine.decode import has_numeric_signal, missing_decoder_package
+from .engine.decode import (
+    channels_log_times,
+    first_numeric_fields,
+    missing_decoder_package,
+)
 from .engine.discovery import SCALAR_SIDECAR, TELEMETRY, discover_channels
 from .engine.score import (
     CONFIG_VERSION,
+    MotionSource,
     compute_raw_episode_metrics,
     finalize_batch,
 )
@@ -128,6 +135,25 @@ def _channel_picker(section, name, choices, selected, **field_kwargs):
     section.list(name, types.String(), default=[], view=view, **field_kwargs)
 
 
+def _signal_value(topic, group):
+    """Stable JSON form value for one ``channel -> field group`` option."""
+    return json.dumps([topic, group], separators=(",", ":"))
+
+
+def _motion_sources(position_values, velocity_values):
+    """Parses the form's two signal lists into engine motion sources."""
+    sources = []
+    seen = set()
+    for kind, values in (("position", position_values), ("velocity", velocity_values)):
+        for value in values or ():
+            if value in seen:
+                continue
+            seen.add(value)
+            topic, group = json.loads(value)
+            sources.append(MotionSource(topic, group, kind))
+    return sources
+
+
 def _local_path(sample):
     """The path to open ``sample``'s media from Python.
 
@@ -153,8 +179,31 @@ def _discover_scorable(filepath):
 
 
 @lru_cache(maxsize=256)
-def _channel_has_numeric_signal(filepath, channel):
-    return has_numeric_signal(filepath, channel)
+def _channel_field_groups(filepath, channel):
+    fields = first_numeric_fields(filepath, channel)
+    if not fields:
+        return ()
+    record = (0, 0, fields)
+    return tuple(windowing.field_groups([record]))
+
+
+def _auto_window_for_view(view, sources):
+    """Resolves Auto windowing from every selected signal in the target view."""
+    topics = {source.topic for source in sources}
+    rates_hz, durations_s = [], []
+    for sample in view:
+        filepath = _local_path(sample)
+        for times in channels_log_times(filepath, topics).values():
+            times = np.asarray(times, dtype=np.int64)
+            if len(times) < 2:
+                continue
+            gaps_s = np.diff(times).astype(np.float64) / 1e9
+            positive = gaps_s[gaps_s > 0]
+            if len(positive) == 0:
+                continue
+            rates_hz.append(1.0 / float(np.median(positive)))
+            durations_s.append(float((times[-1] - times[0]) / 1e9))
+    return windowing.resolve_auto_window(rates_hz, durations_s)
 
 
 class ComputeEpisodeQuality(foo.Operator):
@@ -223,13 +272,9 @@ class ComputeEpisodeQuality(foo.Operator):
 
         telemetry = [c for c in disc if c.kind == TELEMETRY]
 
-        # A channel is excluded from Motion only when it *decoded* to no
-        # numeric fields (e.g. a string-only label channel). When no decoder
-        # for its encoding is installed at all, nothing is known about the
-        # channel, so it stays selectable -- the environment's gaps are
-        # surfaced as a warning naming the missing package, never silently
-        # imposed as "your data has no motion". A pod without
-        # mcap-protobuf-support once disabled the whole family this way.
+        # A channel is excluded from Motion when its first message decodes to
+        # no numeric field groups. Missing decoders are reported separately;
+        # without fields, the form cannot offer granular signal choices.
         # Failed imports are not cached by Python, so probe once per distinct
         # encoding rather than once per channel (dynamic=True re-resolves the
         # form on every interaction).
@@ -244,11 +289,19 @@ class ComputeEpisodeQuality(foo.Operator):
             package = package_by_encoding[c.message_encoding]
             if package is not None:
                 missing_packages[package] = missing_packages.get(package, 0) + 1
-                motion_candidates.append(c)
-            elif _channel_has_numeric_signal(filepath, c):
+            elif _channel_field_groups(filepath, c):
                 motion_candidates.append(c)
 
-        has_motion = bool(motion_candidates)
+        signal_choices = [
+            (
+                _signal_value(channel.topic, group),
+                f"{channel.topic} \u2192 {group} ({channel.schema_name})",
+            )
+            for channel in motion_candidates
+            for group in _channel_field_groups(filepath, channel)
+        ]
+        eligible_signals = {value for value, _ in signal_choices}
+        has_motion = bool(signal_choices)
 
         if missing_packages:
             details = "; ".join(
@@ -260,9 +313,9 @@ class ComputeEpisodeQuality(foo.Operator):
                 types.Warning(
                     label=(
                         f"Missing MCAP decoders on this server: {details}. "
-                        "Affected channels stay selectable, but every family "
-                        "decodes them to nothing until the package(s) are "
-                        "installed in the server's Python environment."
+                        "Affected channels cannot expose field-group signal "
+                        "choices until the package(s) are installed in the "
+                        "server's Python environment."
                     )
                 ),
             )
@@ -285,8 +338,17 @@ class ComputeEpisodeQuality(foo.Operator):
         outliers_cfg = ctx.params.get("outliers_cfg") or {}
 
         motion_enabled = has_motion and ctx.params.get("motion_enabled", has_motion)
-        eligible_motion = {c.topic for c in motion_candidates}
-        motion_sources = [t for t in (motion_cfg.get("motion_sources") or []) if t in eligible_motion]
+        position_signals = [
+            value
+            for value in (motion_cfg.get("position_signals") or [])
+            if value in eligible_signals
+        ]
+        velocity_signals = [
+            value
+            for value in (motion_cfg.get("velocity_signals") or [])
+            if value in eligible_signals and value not in position_signals
+        ]
+        motion_sources = _motion_sources(position_signals, velocity_signals)
         motion_metrics = _selected_metrics(motion_cfg, MOTION_METRIC_ROWS)
 
         health_enabled = ctx.params.get("health_enabled", True)
@@ -309,7 +371,7 @@ class ComputeEpisodeQuality(foo.Operator):
                 "motion_enabled",
                 label="Motion smoothness",
                 description=(
-                    "Smoothness of the robot's motion, per channel, worst channel drives the score"
+                    "Smoothness per selected position or velocity signal; worst signal drives the score"
                     if has_motion
                     else "Skipped: no telemetry channel carries a numeric (speed-derivable) signal"
                 ),
@@ -318,28 +380,37 @@ class ComputeEpisodeQuality(foo.Operator):
         if active_tab == "MOTION" and motion_enabled:
             section = _section("motion_cfg")
 
-            # Metrics first (what to compute), channels second (where)
+            # Metrics first (what to compute), signals second (where).
             section.view(
                 "motion_metrics_header",
                 types.Header(
                     label="Metrics",
-                    description="Each is computed on every selected channel's speed profile",
+                    description="Each is computed on every selected signal's speed profile",
                 ),
             )
             _add_metric_checkboxes(section, MOTION_METRIC_ROWS)
 
-            section.view("motion_channels_header", types.Header(label="Channels"))
+            section.view("motion_channels_header", types.Header(label="Signals"))
             _channel_picker(
                 section,
-                "motion_sources",
-                [(c.topic, f"{c.topic} ({c.schema_name})") for c in motion_candidates],
-                motion_sources,
-                required=True,
-                label="Which channels carry motion?",
+                "position_signals",
+                signal_choices,
+                position_signals,
+                label="Position signals",
                 description=(
-                    "Each channel is scored independently and normalized "
-                    "against its own dataset-wide stats; the worst channel "
-                    "per metric drives the episode's score."
+                    "Coordinates or joint positions. Each selected signal is "
+                    "differentiated once to produce speed."
+                ),
+            )
+            _channel_picker(
+                section,
+                "velocity_signals",
+                signal_choices,
+                velocity_signals,
+                label="Velocity signals",
+                description=(
+                    "Linear, angular, or joint velocities. Used directly and "
+                    "preferred over position when both are available."
                 ),
             )
 
@@ -354,13 +425,24 @@ class ComputeEpisodeQuality(foo.Operator):
                     ),
                 ),
             )
-            section.float(
-                "win_s",
-                default=windowing.WINDOW_S,
-                label="Window length (s)",
-                description="Shorter windows localize flags more precisely but get noisier.",
-                min=0.5,
+            section.bool(
+                "auto_window",
+                default=True,
+                label="Choose window length automatically",
+                description=(
+                    "Uses all selected signals in the current view to target "
+                    f"{windowing.AUTO_TARGET_SAMPLES} samples per window with a "
+                    f"{windowing.AUTO_MIN_WINDOW_S:g}-second minimum."
+                ),
             )
+            if not motion_cfg.get("auto_window", True):
+                section.float(
+                    "win_s",
+                    default=windowing.WINDOW_S,
+                    label="Window length (s)",
+                    description="Shorter windows localize flags more precisely but get noisier.",
+                    min=0.5,
+                )
             section.float(
                 "overlap",
                 default=windowing.OVERLAP,
@@ -372,11 +454,11 @@ class ComputeEpisodeQuality(foo.Operator):
             section.float(
                 "idle_alpha",
                 default=activity.IDLE_ALPHA_DEFAULT,
-                label="Idle threshold (x p90 speed)",
+                label="Idle threshold (x moving speed)",
                 description=(
-                    "Fraction of the episode's own 90th-percentile speed that counts as "
-                    "idle. A high percentile, not the median: a mostly-idle episode's "
-                    "median speed IS its idle floor."
+                    "Fraction of the episode's typical speed while moving that counts "
+                    "as idle. The moving-only reference stays above the noise floor in "
+                    "mostly-idle episodes."
                 ),
                 min=0.0,
             )
@@ -430,21 +512,24 @@ class ComputeEpisodeQuality(foo.Operator):
         if active_tab == "OUTLIERS" and outliers_enabled:
             section = _section("outliers_cfg")
             if motion_sources:
-                # Genuinely wired: selected channels' per-channel motion
+                source_keys = [source.key for source in motion_sources]
+                # Genuinely wired: selected signals' motion
                 # features are the columns the models consume. Health
-                # features are episode-wide medians (not per-channel), so
+                # features are episode-wide worst values (not per-signal), so
                 # they always contribute and aren't selectable here.
                 selected_outlier = [
-                    t for t in (outliers_cfg.get("outlier_channels") or []) if t in motion_sources
+                    key
+                    for key in (outliers_cfg.get("outlier_signals") or [])
+                    if key in source_keys
                 ]
                 _channel_picker(
                     section,
-                    "outlier_channels",
-                    [(topic, topic) for topic in motion_sources],
+                    "outlier_signals",
+                    [(key, key) for key in source_keys],
                     selected_outlier,
-                    label="Which channels' motion features feed the models?",
+                    label="Which signals' motion features feed the models?",
                     description=(
-                        "Leave empty to use all selected motion channels. Health "
+                        "Leave empty to use all selected motion signals. Health "
                         "features are episode-wide and always contribute."
                     ),
                 )
@@ -454,8 +539,8 @@ class ComputeEpisodeQuality(foo.Operator):
                     types.Notice(
                         label=(
                             "Models are fit on episode-wide health features only. "
-                            "Select motion channels on the Motion tab to unlock "
-                            "per-channel feature selection here."
+                            "Select motion signals on the Motion tab to unlock "
+                            "signal feature selection here."
                         )
                     ),
                 )
@@ -466,7 +551,7 @@ class ComputeEpisodeQuality(foo.Operator):
                 label=_build_validation_line(
                     has_motion=has_motion,
                     motion_enabled=motion_enabled,
-                    n_motion_channels=len(motion_sources),
+                    n_motion_signals=len(motion_sources),
                     n_motion_metrics=len(motion_metrics),
                     health_enabled=health_enabled,
                     n_health_channels=len(health_channels),
@@ -493,11 +578,17 @@ class ComputeEpisodeQuality(foo.Operator):
         health_cfg = ctx.params.get("health_cfg") or {}
         outliers_cfg = ctx.params.get("outliers_cfg") or {}
 
-        win_s = _setting(motion_cfg, "win_s", windowing.WINDOW_S)
         overlap = _setting(motion_cfg, "overlap", windowing.OVERLAP)
 
         motion_enabled = ctx.params.get("motion_enabled", False)
-        motion_topics = (motion_cfg.get("motion_sources") or []) if motion_enabled else []
+        motion_sources = (
+            _motion_sources(
+                motion_cfg.get("position_signals"),
+                motion_cfg.get("velocity_signals"),
+            )
+            if motion_enabled
+            else []
+        )
         motion_metrics = _selected_metrics(motion_cfg, MOTION_METRIC_ROWS)
         idle_alpha = _setting(motion_cfg, "idle_alpha", activity.IDLE_ALPHA_DEFAULT)
         jerk_cutoff_hz = _setting(motion_cfg, "jerk_cutoff_hz", motion.JERK_CUTOFF_HZ_DEFAULT)
@@ -507,17 +598,23 @@ class ComputeEpisodeQuality(foo.Operator):
         health_metrics = _selected_metrics(health_cfg, HEALTH_METRIC_ROWS)
 
         outliers_enabled = ctx.params.get("outliers_enabled", True)
-        # Empty selection means "all selected motion channels" (engine: None)
-        outlier_channels = outliers_cfg.get("outlier_channels") or None
+        # Empty selection means all selected motion signals (engine: None).
+        outlier_signals = outliers_cfg.get("outlier_signals") or None
 
         view = ctx.target_view()
         n = len(view)
+        auto_window = bool(motion_cfg.get("auto_window", True))
+        if auto_window and motion_sources:
+            win_s, short_fraction = _auto_window_for_view(view, motion_sources)
+        else:
+            win_s = _setting(motion_cfg, "win_s", windowing.WINDOW_S)
+            short_fraction = 0.0
 
         raw_by_id = {}
         for i, sample in enumerate(view):
             raw_by_id[sample.id] = compute_raw_episode_metrics(
                 _local_path(sample),
-                motion_topics=motion_topics,
+                motion_sources=motion_sources,
                 health_topics=health_topics,
                 motion_metrics=motion_metrics,
                 health_metrics=health_metrics,
@@ -536,7 +633,7 @@ class ComputeEpisodeQuality(foo.Operator):
                 yield ctx.trigger("set_progress", {"progress": (i + 1) / n, "label": f"Scored {i + 1}/{n}"})
 
         results, norm_stats = finalize_batch(
-            raw_by_id, outliers_enabled=outliers_enabled, outlier_channels=outlier_channels
+            raw_by_id, outliers_enabled=outliers_enabled, outlier_signals=outlier_signals
         )
 
         temporal_tags = []
@@ -554,13 +651,15 @@ class ComputeEpisodeQuality(foo.Operator):
 
         _register_run(
             ctx.dataset,
-            motion_topics=motion_topics,
+            motion_sources=motion_sources,
             motion_metrics=motion_metrics,
             health_topics=health_topics,
             health_metrics=health_metrics,
             outliers_enabled=outliers_enabled,
-            outlier_channels=outlier_channels,
+            outlier_signals=outlier_signals,
             win_s=win_s,
+            auto_window=auto_window,
+            short_fraction=short_fraction,
             overlap=overlap,
             idle_alpha=idle_alpha,
             jerk_cutoff_hz=jerk_cutoff_hz,
@@ -594,7 +693,7 @@ class ComputeEpisodeQuality(foo.Operator):
 def _build_validation_line(
     has_motion,
     motion_enabled,
-    n_motion_channels,
+    n_motion_signals,
     n_motion_metrics,
     health_enabled,
     n_health_channels,
@@ -608,13 +707,13 @@ def _build_validation_line(
         parts.append("Motion: skipped, no telemetry channel carries a numeric signal")
     elif not motion_enabled:
         parts.append("Motion: skipped by selection")
-    elif n_motion_channels == 0:
-        parts.append("Motion: no channels selected yet (Motion tab)")
+    elif n_motion_signals == 0:
+        parts.append("Motion: no signals selected yet (Motion tab)")
     elif n_motion_metrics == 0:
         parts.append("Motion: no metrics selected -- family will compute nothing")
     else:
         parts.append(
-            f"Motion: {n_motion_metrics} metric(s) on {n_motion_channels} channel(s), scored worst-of"
+            f"Motion: {n_motion_metrics} metric(s) on {n_motion_signals} signal(s), scored worst-of"
         )
 
     if not health_enabled:
@@ -638,13 +737,15 @@ def _build_validation_line(
 
 def _register_run(
     dataset,
-    motion_topics,
+    motion_sources,
     motion_metrics,
     health_topics,
     health_metrics,
     outliers_enabled,
-    outlier_channels,
+    outlier_signals,
     win_s,
+    auto_window,
+    short_fraction,
     overlap,
     idle_alpha,
     jerk_cutoff_hz,
@@ -663,13 +764,18 @@ def _register_run(
     history. A previous run's stats no longer describe what's on the samples.
     """
     cfg = dataset.init_run(
-        motion_topics=sorted(motion_topics),
+        motion_sources=[
+            {"topic": source.topic, "group": source.group, "kind": source.kind}
+            for source in motion_sources
+        ],
         motion_metrics=list(motion_metrics),
         health_topics=sorted(health_topics),
         health_metrics=list(health_metrics),
         outliers_enabled=outliers_enabled,
-        outlier_channels=sorted(outlier_channels) if outlier_channels else None,
+        outlier_signals=sorted(outlier_signals) if outlier_signals else None,
         win_s=win_s,
+        auto_window=auto_window,
+        short_signal_fraction=short_fraction,
         overlap=overlap,
         idle_alpha=idle_alpha,
         jerk_cutoff_hz=jerk_cutoff_hz,

@@ -1,11 +1,9 @@
-"""Windowing: turns a decoded channel's scalar records into fixed-size windows.
+"""Uniform resampling and complete fixed-size windows for motion signals.
 
-2s windows, 50% overlap, on the channel's own nanosecond timebase (no
-cross-channel resampling here -- each channel is windowed against its own
-timestamps, since telemetry channels in a single episode are commonly
-sampled on independent clocks). Every window spans the full window length:
-several motion metrics are duration-dependent, so a short trailing window
-isn't comparable to the full ones it would be normalized against.
+Each selected field group is resampled on its own median-rate grid; there is
+no cross-channel alignment. Dropout-sized gaps remain invalid. Every emitted
+window spans the same run-wide length because several motion metrics are
+duration-dependent.
 """
 
 import re
@@ -13,8 +11,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .health import DROPOUT_GAP_MULTIPLE
+
 WINDOW_S = 2.0
 OVERLAP = 0.5
+AUTO_TARGET_SAMPLES = 100
+AUTO_MIN_WINDOW_S = WINDOW_S
+AUTO_RATE_PERCENTILE = 10
+AUTO_WINDOW_INCREMENT_S = 0.5
 
 _INDEXED_SUFFIX = re.compile(r"_\d+$")
 # `w` is here so a quaternion groups as one 4-D orientation rather than
@@ -27,13 +31,22 @@ class Window:
     """One time window of a channel's field-group vectors.
 
     ``vectors`` is an ``(n_samples, n_dims)`` array of the field-group's raw
-    values within ``[start_s, end_s)``, at the channel's native sample times.
+    values within ``[start_s, end_s)``, on the signal's uniform time grid.
     """
 
     start_s: float
     end_s: float
     group: str
     vectors: np.ndarray
+
+
+@dataclass(frozen=True)
+class UniformSeries:
+    """One field group resampled onto an evenly-spaced time grid."""
+
+    times_s: np.ndarray
+    vectors: np.ndarray
+    fs: float
 
 
 def field_groups(records):
@@ -61,36 +74,88 @@ def field_groups(records):
 
 
 def group_vectors(records, field_names):
-    """Builds one field-group's full-episode ``(n_samples, n_dims)`` vector series.
-
-    This is the same array :func:`windows_for_group` slices into windows
-    internally, exposed separately for callers (e.g. the per-episode
-    idle-speed threshold) that need a stable, whole-episode reference
-    rather than a single window's slice of it.
-    """
+    """Builds one field-group's decoded ``(n_samples, n_dims)`` vector series."""
     return np.array([[fields.get(name, np.nan) for name in field_names] for _, _, fields in records])
 
 
-def windows_for_group(records, group, field_names, win_s=WINDOW_S, overlap=OVERLAP):
-    """Builds overlapping fixed-size windows of one field-group's vector series.
+def uniform_series(records, field_names, gap_multiple=DROPOUT_GAP_MULTIPLE):
+    """Resamples a field group at its robust median message rate.
 
-    Args:
-        records: the decoded records for one channel
-        group: the field-group name (from :func:`field_groups`)
-        field_names: the ordered field names making up this group's vector
-        win_s (2.0): window length, in seconds
-        overlap (0.5): fractional overlap between consecutive windows
-
-    Returns:
-        a list of :class:`Window`, all spanning the full ``win_s`` except
-        when the channel is shorter than one window
+    Finite runs are linearly interpolated onto a uniform grid. Source gaps
+    larger than ``gap_multiple`` expected intervals remain NaN so downstream
+    motion metrics never mistake interpolation through a dropout for observed
+    smooth motion.
     """
     if len(records) < 2:
-        return []
+        return None
 
     t0 = records[0][0]
-    times_s = np.array([(log_time - t0) / 1e9 for log_time, _, _ in records])
-    vectors = group_vectors(records, field_names)
+    times_s = np.asarray([(r[0] - t0) / 1e9 for r in records], dtype=np.float64)
+    gaps = np.diff(times_s)
+    positive_gaps = gaps[gaps > 0]
+    if len(positive_gaps) == 0:
+        return None
+    dt = float(np.median(positive_gaps))
+    fs = 1.0 / dt
+    grid = np.arange(0.0, times_s[-1] + 0.5 * dt, dt)
+    source = np.asarray(group_vectors(records, field_names), dtype=np.float64)
+    values = np.full((len(grid), source.shape[1]), np.nan, dtype=np.float64)
+
+    for col in range(source.shape[1]):
+        finite = np.isfinite(source[:, col])
+        if finite.sum() < 2:
+            continue
+        source_times = times_s[finite]
+        source_values = source[finite, col]
+        source_times, unique_indices = np.unique(source_times, return_index=True)
+        source_values = source_values[unique_indices]
+        if len(source_times) < 2:
+            continue
+        values[:, col] = np.interp(grid, source_times, source_values)
+        edge_tolerance = dt * 1e-9
+        outside = (grid < source_times[0] - edge_tolerance) | (
+            grid > source_times[-1] + edge_tolerance
+        )
+        values[outside, col] = np.nan
+        long_gaps = np.diff(source_times) > gap_multiple * dt
+        for left, right in zip(source_times[:-1][long_gaps], source_times[1:][long_gaps]):
+            values[(grid > left) & (grid < right), col] = np.nan
+
+    return UniformSeries(grid, values, fs)
+
+
+def resolve_auto_window(rates_hz, durations_s):
+    """Chooses one run-wide window from observed rates and episode lengths.
+
+    The low rate percentile protects slower selected signals. A two-second
+    floor preserves useful spectral resolution for ordinary high-rate
+    telemetry; slower corpora receive a longer window to target roughly
+    :data:`AUTO_TARGET_SAMPLES` observations. The value is rounded up to a
+    half-second so it is stable and legible in cached run configuration.
+
+    Returns ``(window_s, short_fraction)`` where ``short_fraction`` is the
+    share of observed signal streams shorter than the resolved window.
+    """
+    rates = np.asarray(rates_hz, dtype=np.float64)
+    rates = rates[np.isfinite(rates) & (rates > 0)]
+    durations = np.asarray(durations_s, dtype=np.float64)
+    durations = durations[np.isfinite(durations) & (durations > 0)]
+    if len(rates) == 0:
+        return WINDOW_S, 0.0
+
+    low_rate = float(np.percentile(rates, AUTO_RATE_PERCENTILE))
+    candidate = max(AUTO_MIN_WINDOW_S, AUTO_TARGET_SAMPLES / low_rate)
+    window_s = float(
+        np.ceil(candidate / AUTO_WINDOW_INCREMENT_S) * AUTO_WINDOW_INCREMENT_S
+    )
+    short_fraction = float(np.mean(durations < window_s)) if len(durations) else 0.0
+    return window_s, short_fraction
+
+
+def windows_for_series(series, group, win_s=WINDOW_S, overlap=OVERLAP):
+    """Builds complete windows from an already-uniform field-group series."""
+    times_s = series.times_s
+    vectors = series.vectors
 
     step_s = win_s * (1.0 - overlap)
     duration_s = times_s[-1]
@@ -98,10 +163,7 @@ def windows_for_group(records, group, field_names, win_s=WINDOW_S, overlap=OVERL
         return []
 
     if duration_s < win_s:
-        # Too short for even one complete window. One window over everything
-        # beats scoring nothing, and since every episode of such a channel
-        # gets the same treatment, the batch stays internally comparable.
-        return [Window(0.0, duration_s, group, vectors)]
+        return []
 
     # Only *complete* windows: a partial trailing window spans less time, and
     # ldlj's dimensionless jerk scales as roughly duration**4, so a
@@ -113,7 +175,7 @@ def windows_for_group(records, group, field_names, win_s=WINDOW_S, overlap=OVERL
     while start_s + win_s <= duration_s:
         end_s = start_s + win_s
         mask = (times_s >= start_s) & (times_s < end_s)
-        if mask.sum() >= 2:
+        if mask.sum() >= 2 and np.isfinite(vectors[mask]).all():
             windows.append(Window(start_s, end_s, group, vectors[mask]))
         start_s += step_s
 

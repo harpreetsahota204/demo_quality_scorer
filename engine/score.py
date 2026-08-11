@@ -35,7 +35,6 @@ HEALTH_METRIC_NAMES = ("dropout", "desync_ms", "clock_drift_ppm", "rate_cov", "c
 AGGREGATE_METRICS = frozenset(
     set(MOTION_METRIC_NAMES)
     | {f"health.{name}" for name in HEALTH_METRIC_NAMES}
-    | {"iforest_score", "knn_dist"}
 )
 
 # Per-metric weights for `overall_score` (normalize.aggregate renormalizes
@@ -47,11 +46,6 @@ METRIC_WEIGHTS = {
     # underlying speed profile's roughness, so at equal weight "motion
     # roughness" implicitly outvotes every other family.
     "jerk_rms": 0.3,
-    # Both are functions of every other metric in the feature matrix, so at
-    # full weight the motion and health signal that produced them gets a
-    # second vote -- the same double-counting argument as jerk_rms.
-    "iforest_score": 0.5,
-    "knn_dist": 0.5,
 }
 
 MIN_WINDOW_SAMPLES = 5
@@ -62,8 +56,8 @@ MIN_WINDOW_SAMPLES = 5
 # before this represents). Written to `quality.config_version` on every
 # sample so the panel can refuse to blend runs computed under different
 # formulas into one ranking.
-# v3: motion metrics are computed per channel and normalized per
-# (metric, channel), with top-level values taken from the worst channel.
+# v3: motion metrics are computed per channel and normalized independently,
+# with top-level values taken from the worst channel.
 # v4: a metric-math correctness pass. One-sided robust scale fit from each
 # metric's bad tail (replacing a two-sided MAD with a fixed 1e-6 floor);
 # psd_lf_hf returned as a log ratio; polarity-aware worst-window tails
@@ -77,34 +71,38 @@ MIN_WINDOW_SAMPLES = 5
 # whose speed never varies are skipped instead of scored as constant columns;
 # clock_drift_ppm reports unavailable rather than 0.0 when there is only one
 # clock.
-CONFIG_VERSION = 5
+# v6: explicit position/velocity field-group sources, uniform resampling,
+# complete windows only, and corrected score/health/normalization semantics.
+# v7: signal-native storage/API names; legacy motion inference and helpers
+# removed.
+CONFIG_VERSION = 7
 
-# Separator for channel-qualified metric keys ("sparc|/left-arm-state").
+# Separator for signal-qualified metric keys ("sparc|/left-arm-state → position (position)").
 # Never written to FiftyOne field names (write.py restructures); only used
 # for normalization stats and outlier feature-matrix keys.
-CHANNEL_SEP = "|"
+SIGNAL_SEP = "|"
 
-# Suffix for a motion metric's per-episode tail summary -- the worst single
-# window, complementing the median over windows. Named for what it means
+# Suffix for a motion metric's per-episode bad-tail summary, complementing the
+# median over windows. Named for what it means
 # rather than for the percentile that produces it, since which percentile
 # that is depends on the metric's polarity (see `_tail_percentile`).
 TAIL_SUFFIX = "_worst"
 TAIL_PERCENTILE = 95
 
 
-def channel_key(metric_name, topic):
-    """The stats/feature-matrix key for one metric on one channel.
+def signal_metric_key(metric_name, signal):
+    """The stats/feature-matrix key for one metric on one signal.
 
-    Motion metrics are never pooled across channels -- a gripper's units and
+    Motion metrics are never pooled across signals -- a gripper's units and
     a shoulder joint's aren't comparable -- so every motion lookup is keyed by
     the pair, not the metric alone.
     """
-    return f"{metric_name}{CHANNEL_SEP}{topic}"
+    return f"{metric_name}{SIGNAL_SEP}{signal}"
 
 
 @dataclass(frozen=True)
 class WindowRecord:
-    """One metric's value on one window of one channel's field group.
+    """One metric's value on one window of one selected signal.
 
     The unit of interval flagging: `_finalize_intervals` z-scores each of
     these against window-level stats and merges the ones that clear a
@@ -114,11 +112,25 @@ class WindowRecord:
     """
 
     channel: str
+    source: str
     group: str
     metric: str
     start_s: float
     end_s: float
     value: float
+
+
+@dataclass(frozen=True)
+class MotionSource:
+    """One user-selected numeric signal and how it becomes speed."""
+
+    topic: str
+    group: str
+    kind: str
+
+    @property
+    def key(self):
+        return f"{self.topic} \u2192 {self.group} ({self.kind})"
 
 
 @dataclass
@@ -133,11 +145,12 @@ class RawEpisodeMetrics:
     """
 
     scalars: dict = field(default_factory=dict)
-    # {topic: {metric_name: value}} -- per-channel motion metrics (incl.
+    # {signal_key: {metric_name: value}} -- per-signal motion metrics (incl.
     # `_worst` tails, idle_frac, saturation_frac). Kept separate from
-    # `scalars` because channel topics aren't valid FiftyOne field names and
-    # because normalization is per (metric, channel).
-    motion_by_channel: dict = field(default_factory=dict)
+    # `scalars` because signal labels aren't valid FiftyOne field names and
+    # because normalization is per (metric, signal).
+    motion_by_signal: dict = field(default_factory=dict)
+    motion_sources: dict = field(default_factory=dict)
     window_records: list = field(default_factory=list)
     duration_s: float = 0.0
 
@@ -157,16 +170,17 @@ class EpisodeResult:
     intervals: list
     duration_s: float
     config_version: int = CONFIG_VERSION
-    # {topic: {metric_name: value}} -- raw per-channel motion metrics
-    motion_by_channel: dict = field(default_factory=dict)
-    # {metric_name: topic} -- which channel's z-score drove each top-level
+    # {signal_key: {metric_name: value}} -- raw per-signal motion metrics
+    motion_by_signal: dict = field(default_factory=dict)
+    motion_sources: dict = field(default_factory=dict)
+    # {metric_name: signal_key} -- which signal's z-score drove each top-level
     # motion value (worst-of aggregation)
-    motion_worst_channel: dict = field(default_factory=dict)
+    motion_worst_signal: dict = field(default_factory=dict)
 
 
 def compute_raw_episode_metrics(
     filepath,
-    motion_topics=(),
+    motion_sources=(),
     health_topics=(),
     motion_metrics=MOTION_METRIC_NAMES,
     health_metrics=HEALTH_METRIC_NAMES,
@@ -177,9 +191,9 @@ def compute_raw_episode_metrics(
 ):
     """Computes one episode's raw (not-yet-normalized) quality metrics.
 
-    Motion and health are scored over independently-selectable channel sets
+    Motion and health are scored over independently-selectable signal/channel sets
     (a family the operator's form let the user uncheck contributes nothing
-    here, rather than being filtered out later): pass `motion_topics=()`
+    here, rather than being filtered out later): pass ``motion_sources=()``
     and/or `health_topics=()` to skip either family entirely. Within a
     family, `motion_metrics`/`health_metrics` select which individual
     metrics to compute -- a deselected metric is simply absent from the
@@ -187,11 +201,8 @@ def compute_raw_episode_metrics(
 
     Args:
         filepath: path to the episode's MCAP file
-        motion_topics: the channel topics to run motion-smoothness metrics
-            (SPARC/LDLJ/jerk RMS/PSD ratio/idle/saturation) on. Each topic
-            is scored independently (per-channel values land in
-            ``RawEpisodeMetrics.motion_by_channel``); empty to skip the
-            Motion family
+        motion_sources: explicit :class:`MotionSource` instances. Each signal
+            is uniformly resampled and scored independently
         health_topics: the channel topics to run sensor-health metrics
             (dropout, rate stability, clock drift, clipping, pairwise
             desync) on; empty to skip the Health family
@@ -202,20 +213,18 @@ def compute_raw_episode_metrics(
         win_s: window length, in seconds (motion windows only; health
             metrics use the episode's full message stream)
         overlap: fractional overlap between consecutive windows
-        idle_alpha (0.05): idle-speed threshold, as a fraction of each
-            channel+group's own *moving* speed (see
-            `activity.episode_idle_threshold`)
+        idle_alpha (0.05): idle-speed threshold as a fraction of each
+            signal's own moving speed
         jerk_cutoff_hz (10.0): low-pass cutoff, in Hz, for `motion.jerk_rms`'s
             pre-filter
-
     Returns:
         a :class:`RawEpisodeMetrics`
     """
-    motion_topics = set(motion_topics)
+    selected_sources = tuple(motion_sources)
     health_topics = set(health_topics)
     motion_metrics = set(motion_metrics)
     health_metrics = set(health_metrics)
-    needed_topics = health_topics | motion_topics
+    needed_topics = health_topics | {source.topic for source in selected_sources}
 
     channels = {
         c.topic: c
@@ -226,7 +235,6 @@ def compute_raw_episode_metrics(
     channel_records = {topic: recs for topic, recs in channel_records.items() if recs}
     duration_s = max((windowing.channel_duration_s(recs) for recs in channel_records.values()), default=0.0)
 
-    motion_values_by_topic = {topic: defaultdict(list) for topic in motion_topics}
     health_values = defaultdict(list)
     window_records = []
 
@@ -266,52 +274,69 @@ def compute_raw_episode_metrics(
         if desyncs:
             health_values["desync_ms"].append(max(desyncs))
 
-    for motion_topic in motion_topics:
-        records = channel_records.get(motion_topic)
+    motion_values_by_signal = {source.key: defaultdict(list) for source in selected_sources}
+    for source in selected_sources:
+        records = channel_records.get(source.topic)
         if not records:
             continue
 
-        motion_values = motion_values_by_topic[motion_topic]
-        expected_dt, _, _ = health.rate_stats(records)
-        fs = 1.0 / expected_dt if expected_dt and expected_dt > 0 else np.nan
+        groups = windowing.field_groups(records)
+        field_names = groups.get(source.group)
+        if not field_names:
+            continue
+        series = windowing.uniform_series(records, field_names)
+        if series is None:
+            continue
+        windows = windowing.windows_for_series(series, source.group, win_s, overlap)
+        valid_windows = [w for w in windows if w.vectors.shape[0] >= MIN_WINDOW_SAMPLES]
+        if not valid_windows:
+            continue
 
-        for group, field_names in windowing.field_groups(records).items():
-            full_vectors = windowing.group_vectors(records, field_names)
-            if not motion.has_speed_variation(full_vectors, group, fs):
-                continue
+        motion_values = motion_values_by_signal[source.key]
+        speeds = [
+            motion.speed_profile(w.vectors, source.kind, series.fs)
+            for w in valid_windows
+        ]
+        idle_threshold = activity.idle_threshold_from_speed(
+            np.concatenate(speeds), series.fs, alpha=idle_alpha
+        )
 
-            idle_threshold = activity.episode_idle_threshold(full_vectors, group, fs, alpha=idle_alpha)
+        for window, speed in zip(valid_windows, speeds):
+            _append_if_finite(
+                motion_values,
+                "idle_frac",
+                activity.idle_fraction_from_speed(speed, idle_threshold, series.fs),
+            )
+            _append_if_finite(motion_values, "saturation_frac", activity.pinned_fraction(window.vectors))
 
-            for window in windowing.windows_for_group(records, group, field_names, win_s, overlap):
-                if window.vectors.shape[0] < MIN_WINDOW_SAMPLES or np.isnan(fs):
+            for metric_name, metric_fn in MOTION_METRICS:
+                if metric_name not in motion_metrics:
                     continue
-
-                _append_if_finite(
-                    motion_values, "idle_frac", activity.idle_frac(window.vectors, group, idle_threshold, fs)
+                value = (
+                    metric_fn(speed, series.fs, jerk_cutoff_hz)
+                    if metric_name == "jerk_rms"
+                    else metric_fn(speed, series.fs)
                 )
-                _append_if_finite(motion_values, "saturation_frac", activity.pinned_fraction(window.vectors))
-
-                speed = motion.speed_profile(window.vectors, group, fs)
-                for metric_name, metric_fn in MOTION_METRICS:
-                    if metric_name not in motion_metrics:
-                        continue
-                    value = (
-                        metric_fn(speed, fs, jerk_cutoff_hz) if metric_name == "jerk_rms" else metric_fn(speed, fs)
+                if np.isnan(value):
+                    continue
+                motion_values[metric_name].append(value)
+                window_records.append(
+                    WindowRecord(
+                        source.topic,
+                        source.key,
+                        source.group,
+                        metric_name,
+                        window.start_s,
+                        window.end_s,
+                        value,
                     )
-                    if np.isnan(value):
-                        continue
-                    motion_values[metric_name].append(value)
-                    window_records.append(
-                        WindowRecord(motion_topic, group, metric_name, window.start_s, window.end_s, value)
-                    )
+                )
 
-    # Reduce each channel's per-window values to two numbers: the median (what
-    # the episode was typically like) and the worst window (whether it ever
-    # went badly wrong). Both are needed -- a single bad grasp in a two-minute
-    # episode barely moves the median, and an episode that is uniformly
-    # mediocre never produces a standout worst window.
-    motion_by_channel = {}
-    for topic, motion_values in motion_values_by_topic.items():
+    # Reduce each signal's windows to its median and robust bad-tail
+    # percentile. The median captures typical behavior; p5/p95 catches a bad
+    # stretch without letting one numerical spike define the episode.
+    motion_by_signal = {}
+    for signal, motion_values in motion_values_by_signal.items():
         channel_scalars = {}
         for name in MOTION_METRIC_NAMES:
             if motion_values[name]:
@@ -323,27 +348,27 @@ def compute_raw_episode_metrics(
             if motion_values[name]:
                 channel_scalars[name] = float(np.median(motion_values[name]))
         if channel_scalars:
-            motion_by_channel[topic] = channel_scalars
+            motion_by_signal[signal] = channel_scalars
 
-    # Health metrics collapse to one episode-wide number per metric, median
-    # across whatever contributed (channels, field groups, or channel pairs).
-    # Median rather than max: a rig with 20 health channels would otherwise
-    # have its score set by whichever single channel is flakiest, on every
-    # episode, which ranks nothing.
+    # Health is a triage family: one failed channel or field group is enough
+    # to make an episode worth reviewing, so retain the worst contribution.
     scalars = {}
     for name, values in health_values.items():
         if values:
-            scalars[f"health.{name}"] = float(np.median(values))
+            scalars[f"health.{name}"] = _health_rollup(values)
 
     return RawEpisodeMetrics(
         scalars=scalars,
-        motion_by_channel=motion_by_channel,
+        motion_by_signal=motion_by_signal,
+        motion_sources={
+            source.key: source for source in selected_sources if source.key in motion_by_signal
+        },
         window_records=window_records,
         duration_s=duration_s,
     )
 
 
-def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
+def finalize_batch(raw_by_id, outliers_enabled=True, outlier_signals=None):
     """Normalizes a batch of episodes' raw metrics and finalizes their scores.
 
     Fits dataset-wide robust-z stats and the outlier models across every
@@ -358,9 +383,9 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
             are omitted entirely (not merely excluded from the aggregate),
             since fitting them costs a pass over the whole batch that
             nobody asked for.
-        outlier_channels (None): which channels' per-channel *motion*
+        outlier_signals (None): which selected signals' motion
             features feed the outlier models; ``None`` means all of them.
-            Health features are episode-wide medians (not per-channel), so
+            Health features are episode-wide worst values (not per-signal), so
             they always contribute. Only affects the models' feature
             matrix -- normalization stats and z-scores are unaffected.
 
@@ -371,8 +396,8 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
         ``{"median": ..., "mad": ..., "scale_high": ..., "scale_low": ...}``
         dict (cacheable via a
         FiftyOne run, see :mod:`operators`). Motion entries in both dicts are keyed
-        per (metric, channel) as ``"<metric>|<topic>"`` -- different
-        channels can carry different units (rad/s vs m/s), so pooling them
+        per (metric, signal) as ``"<metric>|<signal>"`` -- different
+        signals can carry different units (rad/s vs m/s), so pooling them
         into one stats fit would be meaningless. Episode- and window-level
         values are normalized separately because raw per-window values are
         naturally far more spread out than episode-level
@@ -380,8 +405,8 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
         other would flag almost every above-average window as a severe
         outlier.
 
-    Motion metrics aggregate **worst-of across channels**: each channel is
-    z-scored against its own (metric, channel) stats, and the highest
+    Motion metrics aggregate **worst-of across signals**: each signal is
+    z-scored against its own (metric, signal) stats, and the highest
     (worst) z per metric drives the top-level value, `overall_score`, and
     `n_flags`. Rationale: this scorer is triage, and averaging (as e.g.
     RINSE does for bimanual filtering) would let one smooth arm mask a
@@ -389,22 +414,22 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
     """
     sample_ids = list(raw_by_id)
 
-    # Feature keys: plain health names + channel-qualified motion names.
-    # Per-channel motion features feed the outlier models directly.
+    # Feature keys: plain health names + signal-qualified motion names.
+    # Per-signal motion features feed the outlier models directly.
     metric_names = sorted(
         {name for raw in raw_by_id.values() for name in raw.scalars}
         | {
-            channel_key(name, topic)
+            signal_metric_key(name, signal)
             for raw in raw_by_id.values()
-            for topic, channel_scalars in raw.motion_by_channel.items()
-            for name in channel_scalars
+            for signal, signal_scalars in raw.motion_by_signal.items()
+            for name in signal_scalars
         }
     )
 
     def _raw_value(raw, key):
-        base, _, topic = key.partition(CHANNEL_SEP)
-        if topic:
-            return raw.motion_by_channel.get(topic, {}).get(base, np.nan)
+        base, _, signal = key.partition(SIGNAL_SEP)
+        if signal:
+            return raw.motion_by_signal.get(signal, {}).get(base, np.nan)
         return raw.scalars.get(key, np.nan)
 
     feature_matrix = np.array(
@@ -419,7 +444,7 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
 
     if outliers_enabled:
         iforest_scores, knn_dists = _fit_outliers(
-            feature_matrix, metric_names, episode_stats, outlier_channels
+            feature_matrix, metric_names, episode_stats, outlier_signals
         )
         values_by_metric["iforest_score"] = iforest_scores
         values_by_metric["knn_dist"] = knn_dists
@@ -430,7 +455,7 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
     window_values_by_metric = defaultdict(list)
     for raw in raw_by_id.values():
         for record in raw.window_records:
-            window_values_by_metric[channel_key(record.metric, record.channel)].append(record.value)
+            window_values_by_metric[signal_metric_key(record.metric, record.source)].append(record.value)
     window_stats = normalize.fit(window_values_by_metric)
 
     results = {}
@@ -448,37 +473,37 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
             if name in episode_stats
         }
 
-        # Motion metrics: z per (metric, channel), worst-of across channels
-        motion_worst_channel = {}
+        # Motion metrics: z per (metric, signal), worst-of across signals
+        motion_worst_signal = {}
         for name in MOTION_METRIC_NAMES:
-            worst_z, worst_topic = None, None
-            for topic, channel_scalars in raw.motion_by_channel.items():
-                if name not in channel_scalars:
+            worst_z, worst_signal = None, None
+            for signal, signal_scalars in raw.motion_by_signal.items():
+                if name not in signal_scalars:
                     continue
-                key = channel_key(name, topic)
+                key = signal_metric_key(name, signal)
                 if key not in episode_stats:
                     continue
-                z = normalize.zscore(channel_scalars[name], episode_stats[key], higher_is_worse(name))
+                z = normalize.zscore(signal_scalars[name], episode_stats[key], higher_is_worse(name))
                 if np.isnan(z):
                     continue
                 if worst_z is None or z > worst_z:
-                    worst_z, worst_topic = z, topic
+                    worst_z, worst_signal = z, signal
 
-            if worst_topic is None:
+            if worst_signal is None:
                 continue
             z_by_metric[name] = worst_z
-            motion_worst_channel[name] = worst_topic
-            worst_scalars = raw.motion_by_channel[worst_topic]
+            motion_worst_signal[name] = worst_signal
+            worst_scalars = raw.motion_by_signal[worst_signal]
             scalars[name] = worst_scalars[name]
             if name + TAIL_SUFFIX in worst_scalars:
                 scalars[name + TAIL_SUFFIX] = worst_scalars[name + TAIL_SUFFIX]
 
         # Activity scalars are context, not score: they never enter
         # `overall_score` (see AGGREGATE_METRICS), so there is no z-score to
-        # take a worst-of over. Max across channels surfaces the most notable
+        # take a worst-of over. Max across signals surfaces the most notable
         # value for a reviewer reading the number directly.
         for name in ("idle_frac", "saturation_frac"):
-            values = [cs[name] for cs in raw.motion_by_channel.values() if name in cs]
+            values = [cs[name] for cs in raw.motion_by_signal.values() if name in cs]
             if values:
                 scalars[name] = max(values)
 
@@ -505,24 +530,25 @@ def finalize_batch(raw_by_id, outliers_enabled=True, outlier_channels=None):
             intervals=intervals,
             duration_s=raw.duration_s,
             config_version=CONFIG_VERSION,
-            motion_by_channel=raw.motion_by_channel,
-            motion_worst_channel=motion_worst_channel,
+            motion_by_signal=raw.motion_by_signal,
+            motion_sources=raw.motion_sources,
+            motion_worst_signal=motion_worst_signal,
         )
 
     return results, {"episode": episode_stats, "window": window_stats}
 
 
 def _series_key(item):
-    """Groups window records by the metric series they belong to (a channel+group+metric)."""
+    """Groups window records by the exact selected signal and metric."""
     record, _sev = item
-    return (record.channel, record.group, record.metric)
+    return (record.source, record.metric)
 
 
 def _finalize_intervals(window_records, norm_stats):
     """Turns an episode's flagged windows into the spans shown on the timeline.
 
     Windows are z-scored against *window-level* corpus stats, so "bad" means
-    bad relative to every other window of the same metric on the same channel
+    bad relative to every other window of the same metric on the same signal
     across the dataset -- not relative to this episode, which would flag
     something in every episode including the clean ones.
 
@@ -532,7 +558,7 @@ def _finalize_intervals(window_records, norm_stats):
     """
     flagged = []
     for record in window_records:
-        stats = norm_stats.get(channel_key(record.metric, record.channel))
+        stats = norm_stats.get(signal_metric_key(record.metric, record.source))
         if stats is None:
             continue
         z = normalize.zscore(record.value, stats, higher_is_worse(record.metric))
@@ -543,8 +569,11 @@ def _finalize_intervals(window_records, norm_stats):
     flagged.sort(key=lambda item: (*_series_key(item), item[0].start_s))
 
     intervals = []
-    for (channel, group, metric), group_items in itertools.groupby(flagged, key=_series_key):
-        for merged in _merge_contiguous(list(group_items)):
+    for (_source, metric), group_items in itertools.groupby(flagged, key=_series_key):
+        items = list(group_items)
+        channel = items[0][0].channel
+        group = items[0][0].group
+        for merged in _merge_contiguous(items, metric):
             intervals.append(
                 {
                     "channel": channel,
@@ -558,18 +587,19 @@ def _finalize_intervals(window_records, norm_stats):
     return intervals
 
 
-def _merge_contiguous(items):
+def _merge_contiguous(items, metric):
     """Merges touching/overlapping flagged windows of one series into single spans.
 
-    A merged span reports the worst of what it absorbed (max value, and `fail`
-    wins over `warn`), so collapsing the duplicates never softens a flag.
+    A merged span reports the polarity-aware worst value it absorbed, and
+    `fail` wins over `warn`, so collapsing duplicates never softens a flag.
     Assumes `items` is sorted by start time.
     """
     merged = []
     for record, sev in items:
         if merged and record.start_s <= merged[-1]["end"]:
             merged[-1]["end"] = max(merged[-1]["end"], record.end_s)
-            merged[-1]["value"] = max(merged[-1]["value"], record.value)
+            choose = max if higher_is_worse(metric) else min
+            merged[-1]["value"] = choose(merged[-1]["value"], record.value)
             merged[-1]["severity"] = "fail" if "fail" in (merged[-1]["severity"], sev) else "warn"
         else:
             merged.append({"start": record.start_s, "end": record.end_s, "value": record.value, "severity": sev})
@@ -584,14 +614,14 @@ def higher_is_worse(metric_name):
     have to strip a key before asking. Health metrics aren't listed in
     `motion.HIGHER_IS_WORSE`; they're all "more is worse", hence the default.
     """
-    base = metric_name.split(CHANNEL_SEP, 1)[0]  # strip any "|<topic>" qualifier
+    base = metric_name.split(SIGNAL_SEP, 1)[0]
     if base.endswith(TAIL_SUFFIX):
         base = base[: -len(TAIL_SUFFIX)]
     return motion.HIGHER_IS_WORSE.get(base, True)
 
 
 def _tail_percentile(metric_name):
-    """Which percentile of an episode's windows holds its *worst* window.
+    """Which robust tail percentile summarizes an episode's bad windows.
 
     p95 for a metric where higher is worse, p5 where lower is worse. Taking
     p95 unconditionally (as this used to) returns the single *smoothest*
@@ -602,29 +632,29 @@ def _tail_percentile(metric_name):
     return TAIL_PERCENTILE if higher_is_worse(metric_name) else 100 - TAIL_PERCENTILE
 
 
-def _outlier_feature_columns(metric_names, outlier_channels):
+def _outlier_feature_columns(metric_names, outlier_signals):
     """Which feature columns feed the outlier models.
 
     Drops the :data:`TAIL_SUFFIX` columns: each is a percentile of the very
     same per-window distribution its median twin already summarizes, so
     keeping both counts the motion block twice in a Euclidean distance
-    without adding information. Channel-qualified columns are subset by
-    `outlier_channels` (None means all); unqualified health columns are
+    without adding information. Signal-qualified columns are subset by
+    `outlier_signals` (None means all); unqualified health columns are
     episode-wide and always contribute.
     """
-    allowed = None if outlier_channels is None else set(outlier_channels)
+    allowed = None if outlier_signals is None else set(outlier_signals)
     columns = []
     for i, name in enumerate(metric_names):
-        base, _, topic = name.partition(CHANNEL_SEP)
+        base, _, signal = name.partition(SIGNAL_SEP)
         if base.endswith(TAIL_SUFFIX):
             continue
-        if allowed is not None and topic and topic not in allowed:
+        if allowed is not None and signal and signal not in allowed:
             continue
         columns.append(i)
     return columns
 
 
-def _fit_outliers(feature_matrix, metric_names, episode_stats, outlier_channels):
+def _fit_outliers(feature_matrix, metric_names, episode_stats, outlier_signals):
     """Fits the outlier models on oriented z-scores rather than raw values.
 
     kNN distance is a plain Euclidean metric, so raw mixed-unit columns
@@ -641,7 +671,7 @@ def _fit_outliers(feature_matrix, metric_names, episode_stats, outlier_channels)
     :func:`.outliers.fit_and_score`.
     """
     n_samples = feature_matrix.shape[0]
-    columns = _outlier_feature_columns(metric_names, outlier_channels)
+    columns = _outlier_feature_columns(metric_names, outlier_signals)
     if not columns or n_samples == 0:
         return np.full(n_samples, np.nan), np.full(n_samples, np.nan)
 
@@ -672,3 +702,8 @@ def _append_if_finite(values_by_metric, name, value):
     """
     if value is not None and not np.isnan(value):
         values_by_metric[name].append(value)
+
+
+def _health_rollup(values):
+    """Worst contribution across channels/groups for triage."""
+    return float(np.max(values))

@@ -155,12 +155,10 @@ export function Button(props: {
   label: string;
   onClick: () => void;
   primary?: boolean;
-  disabled?: boolean;
 }) {
   return (
     <button
       onClick={props.onClick}
-      disabled={props.disabled}
       style={{
         background: props.primary ? theme.accent : "transparent",
         border: `1px solid ${props.primary ? theme.accent : theme.cardBorder}`,
@@ -169,8 +167,7 @@ export function Button(props: {
         padding: "7px 14px",
         fontSize: 12,
         fontWeight: 600,
-        cursor: props.disabled ? "default" : "pointer",
-        opacity: props.disabled ? 0.5 : 1,
+        cursor: "pointer",
         transition: "filter 120ms",
       }}
       onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.filter = "brightness(1.15)")}

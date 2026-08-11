@@ -33,6 +33,7 @@ _ROS_TIME_TYPES = frozenset({"Time", "Duration"})
 # Guard against a pathologically deep schema; real kinematics sit one or two
 # levels down (``Odometry.pose.position.x`` is the deepest common case).
 _MAX_NESTING_DEPTH = 4
+_TRANSFORM_TOLERANCE = 1e-6
 
 
 def decode_channel(filepath, channel):
@@ -55,31 +56,29 @@ def decode_channel(filepath, channel):
     raise ValueError(f"Cannot decode a '{channel.kind}' channel as scalar telemetry")
 
 
-def has_numeric_signal(filepath, channel):
-    """Peeks a channel's first message to check whether it carries any numeric field.
+def first_numeric_fields(filepath, channel):
+    """Returns the numeric fields on a channel's first message.
 
-    A channel can be structurally valid telemetry (protobuf/ROS, not
-    camera/scalar_sidecar) yet carry no numeric field at all -- e.g.
-    ABC-130k's ``/instruction`` channel, a protobuf-encoded natural-language
-    label with zero numeric fields. Used to decide Motion-family
-    eligibility: only channels with *some* numeric signal can produce a
-    speed profile at all. Reads only the first message, bounding the cost
-    of checking every discovered channel to one message each, not a full
-    decode.
-
-    Args:
-        filepath: path to the MCAP file
-        channel: a :class:`.discovery.ChannelInfo`
-
-    Returns:
-        True iff the channel's first message decodes to at least one
-        numeric field
+    This is the lightweight field-schema probe used by the operator form to
+    offer individual ``channel -> field group`` motion signals. It decodes one
+    message only; scoring still performs the full channel decode later.
     """
     if channel.kind == SCALAR_SIDECAR:
-        return bool(_first_json_fields(filepath, channel.topic))
+        return _first_json_fields(filepath, channel.topic)
     if channel.kind == TELEMETRY:
-        return bool(_first_structured_fields(filepath, channel.topic))
-    return False
+        return _first_structured_fields(filepath, channel.topic)
+    return {}
+
+
+def channels_log_times(filepath, topics):
+    """Returns log timestamps for multiple channels in one body-free MCAP scan."""
+    times_by_topic = {topic: [] for topic in topics}
+    with open(filepath, "rb") as f:
+        for _, channel, message in make_reader(f).iter_messages(
+            topics=list(times_by_topic)
+        ):
+            times_by_topic[channel.topic].append(message.log_time)
+    return times_by_topic
 
 
 def _first_json_fields(filepath, topic):
@@ -310,7 +309,12 @@ def _is_homogeneous_transform(values):
     if len(values) != 16:
         return False
     a, b, c, d = values[12:16]
-    return abs(a) < 1e-6 and abs(b) < 1e-6 and abs(c) < 1e-6 and abs(d - 1.0) < 1e-6
+    return (
+        abs(a) < _TRANSFORM_TOLERANCE
+        and abs(b) < _TRANSFORM_TOLERANCE
+        and abs(c) < _TRANSFORM_TOLERANCE
+        and abs(d - 1.0) < _TRANSFORM_TOLERANCE
+    )
 
 
 def _flatten_transform(name, values, out):
