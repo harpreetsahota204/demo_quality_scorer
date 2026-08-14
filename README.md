@@ -1,5 +1,7 @@
 # Demo Quality Scorer
 
+![](assets/mm_curation_1.gif)
+
 A FiftyOne plugin that ranks multimodal MCAP episodes worst-first on motion
 smoothness, sensor health, and outlier metrics, then deep-links into the
 multimodal viewer so you can confirm every flag by eye.
