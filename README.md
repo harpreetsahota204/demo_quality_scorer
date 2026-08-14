@@ -38,6 +38,8 @@ Then install the plugion:
 
 `fiftyone plugins download https://github.com/harpreetsahota204/demo_quality_scorer`
 
+FiftyOne Enterprise users: See the [custom plugins documentation](https://github.com/voxel51/fiftyone-teams-app-deploy/blob/main/docs/custom-plugins.md) for how to make additional Python packages like `mcap-protobuf-support` available to your deployment.
+
 Set `VFF_MULTIMODAL=1` as an environment variable **before** `fiftyone` is
 imported, in every process that touches a multimodal dataset (scoring script,
 `fiftyone app launch`, notebook). This gates the App's native MCAP viewer and
