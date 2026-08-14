@@ -27,10 +27,16 @@ that, so the scores exist to order your queue, not to make the call.
 
 ## Install
 
+Install requirements: 
+
 ```bash
 pip install "fiftyone[multimodal]>=1.19.0" mcap mcap-protobuf-support \
     mcap-ros1-support mcap-ros2-support numpy scipy scikit-learn
 ```
+
+Then install the plugion:
+
+`fiftyone plugins download https://github.com/harpreetsahota204/demo_quality_scorer`
 
 Set `VFF_MULTIMODAL=1` as an environment variable **before** `fiftyone` is
 imported, in every process that touches a multimodal dataset (scoring script,
@@ -57,29 +63,34 @@ for watch mode) and hard-refresh the browser.
    current view changes, so filtering the grid re-ranks the panel to match.
 
 The form has one tab per metric family. Each tab holds that family's on/off
-switch, its per-metric checkboxes, and its signal or channel picker. Your selections
-persist when you switch tabs, and the advisory line above **Run** always
-reflects all three families.
+switch, its per-metric checkboxes, and its signal or channel picker. 
 
 **Motion smoothness.** Enabled when the first sample has at least one
 telemetry channel carrying a numeric signal a speed profile can be derived
 from. If none does (a camera-only episode, for example), the family switches
-itself off and says why. A channel is excluded when its messages decode to no
-numeric fields. If the server lacks the decoder for an encoding (for example,
+itself off and says why. 
+
+A channel is excluded when its messages decode to no  numeric fields. If the server lacks the decoder for an encoding (for example,
 `mcap-protobuf-support` for protobuf), affected channels cannot expose signal
 choices and the form names the package to install.
+
 Pick exact numeric signals from two inputs: **Position signals** are
 differentiated once to obtain speed, while **Velocity signals** are used
-directly and are preferred when available. Options are field-group granular,
+directly and are preferred when available. 
+
+Options are field-group granular,
 such as `/odom -> pose_position` and `/odom -> twist_linear`, so one mixed
 message can contribute both without treating covariance or orientation as
 motion. Each signal is scored on its own and the worst signal per metric
-drives the episode's score. The four metric
-checkboxes (SPARC, LDLJ, Jerk RMS, PSD ratio) are all on by default and carry
-short validity notes: SPARC is the most validated of the four and the least
-affected by sensor noise, while LDLJ and jerk RMS are noise-sensitive, so
-consider unchecking those two on noisy telemetry. Anything you uncheck is absent from `quality.*`
-and the overall score renormalizes over what is left.
+drives the episode's score. 
+
+The four metric checkboxes (SPARC, LDLJ, Jerk RMS, PSD ratio) are all on by default and carry short validity notes: 
+
+- SPARC is the most validated of the four and the least affected by sensor noise
+
+- LDLJ and jerk RMS are noise-sensitive, so consider unchecking those two on noisy telemetry. 
+
+Anything you uncheck is absent from `quality.*` and the overall score renormalizes over what is left.
 
 Windowing settings live in this tab because windows only affect motion (health
 reads full-episode timestamps, outliers read episode scalars):
