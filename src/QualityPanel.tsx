@@ -69,7 +69,7 @@ export default function QualityPanel() {
     [showOp]
   );
 
-  const tagScope = selected.size > 0 ? `${selected.size} selected` : `all ${data?.rows.length ?? 0} in view`;
+  const tagScope = selected.size > 0 ? `${selected.size} selected` : `all ${data?.rows?.length ?? 0} in view`;
   const tag = useCallback(
     (tagName: string) => tagOp.execute({ tag: tagName, sample_ids: Array.from(selected) }),
     [tagOp, selected]
