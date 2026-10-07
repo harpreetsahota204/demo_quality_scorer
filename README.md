@@ -30,15 +30,19 @@ that, so the scores exist to order your queue, not to make the call.
 Install requirements: 
 
 ```bash
-pip install "fiftyone[multimodal]>=1.19.0" mcap mcap-protobuf-support \
-    mcap-ros1-support mcap-ros2-support numpy scipy scikit-learn
+pip install "fiftyone[multimodal]>=1.19.0" numpy scipy scikit-learn
 ```
 
 Then install the plugion:
 
 `fiftyone plugins download https://github.com/harpreetsahota204/demo_quality_scorer`
 
-FiftyOne Enterprise users: See the [custom plugins documentation](https://github.com/voxel51/fiftyone-teams-app-deploy/blob/main/docs/custom-plugins.md) for how to make additional Python packages like `mcap-protobuf-support` available to your deployment.
+FiftyOne Enterprise users: See the [custom plugins documentation](https://github.com/voxel51/fiftyone-teams-app-deploy/blob/main/docs/custom-plugins.md) for how to make additional Python packages available to your deployment.
+Protobuf and ROS1/ROS2 channels are decoded from the schema embedded in each
+MCAP file using `protobuf` and `rosbags`, the same packages FiftyOne's own
+multimodal decoders use, so a server installed with `fiftyone[multimodal]`
+needs no `mcap-*-support` packages. If those are installed anyway, they are
+used as a fallback.
 
 Set `VFF_MULTIMODAL=1` as an environment variable **before** `fiftyone` is
 imported, in every process that touches a multimodal dataset (scoring script,
@@ -72,9 +76,10 @@ telemetry channel carrying a numeric signal a speed profile can be derived
 from. If none does (a camera-only episode, for example), the family switches
 itself off and says why. 
 
-A channel is excluded when its messages decode to no  numeric fields. If the server lacks the decoder for an encoding (for example,
-`mcap-protobuf-support` for protobuf), affected channels cannot expose signal
-choices and the form names the package to install.
+A channel is excluded when its messages decode to no  numeric fields. If the server can't decode an encoding at all (no `protobuf` for
+protobuf channels, no `rosbags` for ROS channels, both of which come with
+`fiftyone[multimodal]`), affected channels cannot expose signal choices and
+the form names the package to install.
 
 Pick exact numeric signals from two inputs: **Position signals** are
 differentiated once to obtain speed, while **Velocity signals** are used
@@ -378,7 +383,7 @@ available for explicit selection; choose actual Position or Velocity signals
 and leave covariance, dimensions, strides, intrinsics, and static metadata
 unselected.
 
-A channel whose schema the installed decoder can't build types for (a ROS 2
+A channel whose schema the decoder can't build types for (a ROS 2
 definition with a lowercase constant, a schema referencing an unresolvable
 package) is skipped like an empty channel rather than failing the run.
 

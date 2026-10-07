@@ -2,11 +2,16 @@
 
 Handles two channel kinds (see :mod:`.discovery`):
 
-- ``telemetry`` (protobuf / ROS1 / ROS2 structured messages): every numeric
-  field is walked generically off the message's own field descriptors (for
-  protobuf) or ``__slots__`` (for the dynamically-generated ROS1/ROS2
-  message classes) -- never off a hardcoded field name -- so this works on
-  any structured schema.
+- ``telemetry`` (protobuf / ROS1 / ROS2 structured messages): decoded from
+  the schema embedded in the MCAP file, the same way FiftyOne's own
+  multimodal decoders do it (``fiftyone.multimodal.decoders.generic_protobuf``
+  and ``generic_ros``): protobuf via the ``FileDescriptorSet`` and
+  ``google.protobuf``, ROS via the message-definition text and ``rosbags``.
+  Both ship with ``fiftyone[multimodal]``, so no ``mcap-*-support`` package
+  is needed; those are still used as a fallback when installed. Every
+  numeric field is then walked generically off the message's own field
+  descriptors (protobuf) or fields (ROS) -- never off a hardcoded field
+  name -- so this works on any structured schema.
 - ``scalar_sidecar`` (flat JSON messages): decoded directly, keeping only
   numeric leaf values.
 
@@ -14,9 +19,12 @@ Messages with no numeric content (e.g. a string-only instructions message)
 simply produce an empty record; callers skip those.
 """
 
+import dataclasses
 import json
 import math
+from functools import lru_cache
 
+import numpy as np
 from mcap.reader import make_reader
 
 from .discovery import SCALAR_SIDECAR, TELEMETRY
@@ -92,10 +100,10 @@ def _first_json_fields(filepath, topic):
 def _iter_structured_messages(filepath, topic):
     """Yields ``(message, decoded)`` for one protobuf/ROS channel, in log-time order.
 
-    Stops quietly if the installed decoder can't handle the channel. MCAP files
-    come from arbitrary producers, so a schema can be something the decoder
-    refuses to build types for: a ROS 2 message definition with a lowercase
-    constant name, a schema referencing a package it can't resolve, a truncated
+    Stops quietly if no decoder can handle the channel. MCAP files come from
+    arbitrary producers, so a schema can be something the decoder refuses to
+    build types for: a ROS 2 message definition with a lowercase constant
+    name, a schema referencing a package it can't resolve, a truncated
     definition. That is a property of the file rather than a bug here, and it
     must not take down the episode -- one unreadable channel out of twenty
     should cost that channel and nothing else. Callers see the same empty
@@ -103,10 +111,21 @@ def _iter_structured_messages(filepath, topic):
     decoded before a mid-stream failure is kept.
     """
     with open(filepath, "rb") as f:
-        reader = make_reader(f, decoder_factories=_decoder_factories())
+        reader = make_reader(f)
         try:
-            for _, _, message, decoded in reader.iter_decoded_messages(topics=[topic]):
-                yield message, decoded
+            # Read up front: ros2idl schemas reference sibling schemas in the
+            # same file, and the summary can't be fetched mid-iteration.
+            summary = reader.get_summary()
+            schemas = tuple(summary.schemas.values()) if summary else ()
+            decoders = {}
+            for schema, channel, message in reader.iter_messages(topics=[topic]):
+                key = (channel.message_encoding, schema.id if schema else None)
+                if key not in decoders:
+                    decoders[key] = _decoder_for(channel.message_encoding, schema, schemas)
+                decode = decoders[key]
+                if decode is None:
+                    return
+                yield message, decode(message.data)
         except Exception:
             return
 
@@ -143,14 +162,160 @@ def _decode_structured_channel(filepath, topic):
     ]
 
 
-def _decoder_factories():
-    """Whichever MCAP message decoders are installed, in encoding-priority order.
+def _decoder_for(message_encoding, schema, schemas):
+    """A ``bytes -> message`` callable for one channel's schema, or ``None``.
 
-    All three are optional dependencies: a user scoring protobuf episodes
-    shouldn't be forced to install the ROS stacks. Missing ones are skipped
-    here; the operator form reports them explicitly via
-    :func:`missing_decoder_package`, and decode of an affected channel
-    produces empty records rather than an import error.
+    Tries the built-in schema-driven decoders first, then whichever
+    ``mcap-*-support`` decoders happen to be installed.
+
+    Args:
+        message_encoding: the channel's ``message_encoding``
+        schema: the channel's ``mcap.records.Schema``, or ``None``
+        schemas: every schema in the file (for ros2idl cross-references)
+    """
+    if schema is None:
+        return None
+
+    builder = _BUILTIN_DECODERS.get(schema.encoding)
+    if builder is not None:
+        try:
+            return builder(schema, schemas)
+        except Exception:
+            # Missing dependency or a schema it can't parse; let an
+            # installed mcap-*-support decoder have a go.
+            pass
+
+    for factory in _optional_decoder_factories():
+        decode = factory.decoder_for(message_encoding, schema)
+        if decode is not None:
+            return decode
+    return None
+
+
+def _protobuf_decoder(schema, schemas):
+    return _protobuf_message_class(schema.name, bytes(schema.data)).FromString
+
+
+@lru_cache(maxsize=64)
+def _protobuf_message_class(schema_name, schema_data):
+    """Builds a message class from an MCAP-embedded ``FileDescriptorSet``.
+
+    Mirrors ``fiftyone.multimodal.decoders.foxglove._proto_util.message_class_from_schema``.
+    Decoding with a real message class (rather than ``MessageToDict``) keeps
+    the field descriptors that :func:`_iter_protobuf_fields` walks.
+    """
+    from google.protobuf import descriptor_pb2
+    from google.protobuf.message_factory import GetMessages
+
+    fds = descriptor_pb2.FileDescriptorSet()
+    fds.ParseFromString(schema_data)
+    return GetMessages(list(fds.file))[schema_name]
+
+
+def _ros_decoder(schema, schemas):
+    extra_schemas = ()
+    if schema.encoding == "ros2idl":
+        # Unlike ros2msg/ros1msg, ros2idl doesn't inline its dependencies.
+        extra_schemas = tuple(
+            sorted(
+                (s.name, bytes(s.data))
+                for s in schemas
+                if s.encoding == "ros2idl" and s.id != schema.id
+            )
+        )
+
+    stores, typename = _ros_typestores(
+        schema.encoding, schema.name, bytes(schema.data), extra_schemas
+    )
+    method = "deserialize_ros1" if schema.encoding == "ros1msg" else "deserialize_cdr"
+    candidates = [getattr(store, method) for store in stores]
+
+    def decode(data):
+        for i, deserialize in enumerate(candidates):
+            try:
+                message = deserialize(data, typename)
+            except Exception:
+                if i == len(candidates) - 1:
+                    raise
+                continue
+            if i:
+                # Remember which store works so later messages try it first.
+                candidates.insert(0, candidates.pop(i))
+            return message
+
+    return decode
+
+
+@lru_cache(maxsize=64)
+def _ros_typestores(schema_encoding, schema_name, schema_data, extra_schemas):
+    """Parses ROS schema text into candidate ``rosbags`` typestores.
+
+    Mirrors ``fiftyone.multimodal.decoders.generic_ros._build_typestores``:
+    the types parsed from the file alone, then the same types merged over the
+    standard ROS distro store, so common ``std_msgs``/``geometry_msgs`` types
+    resolve even when a schema doesn't embed them.
+
+    Returns:
+        ``(stores, normalized_type_name)``
+    """
+    from rosbags.typesys import (
+        Stores,
+        get_types_from_idl,
+        get_types_from_msg,
+        get_typestore,
+    )
+    from rosbags.typesys.msg import normalize_msgtype
+
+    typename = normalize_msgtype(schema_name)
+
+    types = {}
+    for name, data in ((schema_name, schema_data),) + extra_schemas:
+        text = data.decode("utf-8", errors="replace")
+        try:
+            if schema_encoding == "ros2idl":
+                types.update(get_types_from_idl(text))
+            else:
+                types.update(get_types_from_msg(text, name))
+        except Exception:
+            continue
+
+    if typename not in types:
+        raise ValueError(f"{schema_name!r} not found in its {schema_encoding} schema")
+
+    custom_store = get_typestore(Stores.EMPTY)
+    custom_store.register(types)
+    stores = [custom_store]
+
+    distro = Stores.ROS1_NOETIC if schema_encoding == "ros1msg" else Stores.ROS2_HUMBLE
+    distro_store = get_typestore(distro)
+    try:
+        distro_store.register(types)
+        stores.append(distro_store)
+    except Exception:
+        # A custom type clashes with a same-named standard type.
+        pass
+
+    return tuple(stores), typename
+
+
+# Keyed by the MCAP *schema* encoding, which is what says how to read the
+# schema bytes (the channel's message encoding only names the wire format).
+_BUILTIN_DECODERS = {
+    "protobuf": _protobuf_decoder,
+    "ros1msg": _ros_decoder,
+    "ros2msg": _ros_decoder,
+    "ros2idl": _ros_decoder,
+}
+
+
+@lru_cache(maxsize=1)
+def _optional_decoder_factories():
+    """Whichever ``mcap-*-support`` decoder factories are installed.
+
+    These are a fallback only: the built-in decoders above cover the same
+    encodings with packages ``fiftyone[multimodal]`` already installs, which
+    matters on FiftyOne Enterprise where adding packages to the server image
+    is a deployment change rather than a ``pip install``.
     """
     factories = []
     for module_name, class_name in (
@@ -163,18 +328,19 @@ def _decoder_factories():
         except ImportError:
             continue
         factories.append(getattr(module, class_name)())
-    return factories
+    return tuple(factories)
 
 
-# Maps each structured message encoding to the decoder module that handles it
-# and the pip package that provides that module. ROS 2 recordings write their
-# wire format's name (`cdr`) rather than a `ros2` label, so both map to the
-# ROS 2 stack. JSON is absent deliberately: it decodes with the stdlib.
+# Maps each structured message encoding to the modules that can decode it
+# (built-in dependency first, optional mcap-*-support fallback second) and
+# the pip package to suggest when neither imports. ROS 2 recordings write
+# their wire format's name (`cdr`) rather than a `ros2` label, so both map to
+# the ROS 2 stack. JSON is absent deliberately: it decodes with the stdlib.
 _ENCODING_DECODER_PACKAGES = {
-    "protobuf": ("mcap_protobuf.decoder", "mcap-protobuf-support"),
-    "ros1": ("mcap_ros1.decoder", "mcap-ros1-support"),
-    "ros2": ("mcap_ros2.decoder", "mcap-ros2-support"),
-    "cdr": ("mcap_ros2.decoder", "mcap-ros2-support"),
+    "protobuf": (("google.protobuf.message_factory", "mcap_protobuf.decoder"), "protobuf"),
+    "ros1": (("rosbags.typesys", "mcap_ros1.decoder"), "rosbags"),
+    "ros2": (("rosbags.typesys", "mcap_ros2.decoder"), "rosbags"),
+    "cdr": (("rosbags.typesys", "mcap_ros2.decoder"), "rosbags"),
 }
 
 
@@ -186,27 +352,32 @@ def missing_decoder_package(message_encoding):
     channel at all" (a property of the environment). The two must not be
     conflated: the first justifies excluding a channel, the second is the
     user's call plus a warning naming the package to install -- learned on a
-    FiftyOne Enterprise pod without ``mcap-protobuf-support``, where every
-    protobuf channel silently read as "no numeric signal" and the whole
-    Motion family shut itself off.
+    FiftyOne Enterprise pod where every protobuf channel silently read as
+    "no numeric signal" and the whole Motion family shut itself off.
+
+    Both suggested packages (``protobuf``, ``rosbags``) are part of
+    ``fiftyone[multimodal]``, so this should only fire on a server that
+    wasn't installed with the multimodal extra.
 
     Args:
         message_encoding: a channel's ``message_encoding`` string
 
     Returns:
         the pip package name to install, or ``None`` if the encoding is
-        decodable right now (decoder installed, or JSON which needs none)
+        decodable right now (a decoder imports, or JSON which needs none)
     """
     entry = _ENCODING_DECODER_PACKAGES.get(message_encoding)
     if entry is None:
         return None
 
-    module_name, package = entry
-    try:
-        __import__(module_name)
-    except ImportError:
-        return package
-    return None
+    module_names, package = entry
+    for module_name in module_names:
+        try:
+            __import__(module_name)
+        except ImportError:
+            continue
+        return None
+    return package
 
 
 def _walk_fields(message):
@@ -235,8 +406,9 @@ def _walk_fields(message):
 def _iter_numeric_fields(message, depth=0):
     """Yields ``(field_name, [float, ...])`` for every numeric field on a decoded message.
 
-    Supports both protobuf messages (via ``DESCRIPTOR.fields``) and the
-    dynamically-generated ROS1/ROS2 message classes (via ``__slots__``).
+    Supports protobuf messages (via ``DESCRIPTOR.fields``), the ``rosbags``
+    dataclasses the built-in ROS decoder produces, and the ``__slots__``
+    classes the optional ``mcap-ros*-support`` decoders produce.
 
     Walks nested submessages, joining each level's field name with an
     underscore, because standard schemas put the kinematics one or two levels
@@ -258,7 +430,7 @@ def _iter_numeric_fields(message, depth=0):
     if hasattr(message, "DESCRIPTOR"):
         yield from _iter_protobuf_fields(message, depth)
     else:
-        yield from _iter_slot_fields(message, depth)
+        yield from _iter_ros_fields(message, depth)
 
 
 def _iter_protobuf_fields(message, depth):
@@ -275,16 +447,53 @@ def _iter_protobuf_fields(message, depth):
                 yield f"{field.name}_{name}", values
 
 
-def _iter_slot_fields(message, depth):
-    for name in getattr(message, "__slots__", ()):
+def _iter_ros_fields(message, depth):
+    for name in _ros_field_names(message):
         value = getattr(message, name)
         if _is_number(value):
             yield name, [float(value)]
-        elif isinstance(value, (list, tuple)) and value and all(_is_number(v) for v in value):
+        elif _is_numeric_sequence(value):
             yield name, [float(v) for v in value]
-        elif hasattr(value, "__slots__") and type(value).__name__ not in _ROS_TIME_TYPES:
+        elif _is_ros_message(value) and not _is_ros_time(value):
             for sub, values in _iter_numeric_fields(value, depth + 1):
                 yield f"{name}_{sub}", values
+
+
+def _ros_field_names(message):
+    if dataclasses.is_dataclass(message):
+        # rosbags carries the type name as a `__msgtype__` field; it's not data.
+        return [f.name for f in dataclasses.fields(message) if f.name != "__msgtype__"]
+    return getattr(message, "__slots__", ())
+
+
+def _is_ros_message(value):
+    return (
+        dataclasses.is_dataclass(value) and not isinstance(value, type)
+    ) or hasattr(value, "__slots__")
+
+
+def _is_ros_time(value):
+    # rosbags names the class `builtin_interfaces__msg__Time` and records
+    # `builtin_interfaces/msg/Time` in `__msgtype__`; mcap-ros* names it `Time`.
+    msgtype = getattr(value, "__msgtype__", type(value).__name__)
+    return msgtype.rsplit("/", 1)[-1] in _ROS_TIME_TYPES
+
+
+def _is_numeric_sequence(value):
+    """True for a non-empty, flat sequence of numbers.
+
+    rosbags decodes numeric ROS arrays to ``numpy`` arrays. Byte arrays
+    (``uint8[]``/``int8[]``: image and point-cloud buffers) are excluded, as
+    the ``mcap-ros*`` decoders already exclude them by returning ``bytes``.
+    """
+    if isinstance(value, np.ndarray):
+        return (
+            value.ndim == 1
+            and value.size > 0
+            and value.dtype.kind in "iuf"
+            and value.dtype.itemsize > 1
+        )
+    return isinstance(value, (list, tuple)) and bool(value) and all(_is_number(v) for v in value)
 
 
 def _is_number(value):
